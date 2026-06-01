@@ -10,6 +10,7 @@
         Background="#111111"
         ResizeMode="CanResize"
         WindowStyle="None"
+        PreviewKeyDown="MainWindow_PreviewKeyDown"
         StateChanged="MainWindow_StateChanged">
     <shell:WindowChrome.WindowChrome>
         <shell:WindowChrome CaptionHeight="44"
@@ -250,8 +251,6 @@
                               ClipToBounds="True">
                             <ScrollContentPresenter x:Name="PART_ScrollContentPresenter"
                                                     CanContentScroll="{TemplateBinding CanContentScroll}"
-                                                    CanHorizontallyScroll="False"
-                                                    CanVerticallyScroll="False"
                                                     Content="{TemplateBinding Content}"
                                                     ContentTemplate="{TemplateBinding ContentTemplate}"
                                                     ContentStringFormat="{TemplateBinding ContentStringFormat}"
@@ -270,6 +269,61 @@
                             <ScrollBar x:Name="PART_HorizontalScrollBar"
                                        Visibility="Collapsed" />
                         </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="ComicPageListBoxItemStyle" TargetType="{x:Type ListBoxItem}">
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Margin" Value="0" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Focusable" Value="False" />
+            <Setter Property="HorizontalContentAlignment" Value="Left" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type ListBoxItem}">
+                        <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                          VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                          SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}" />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="ComicPagesListBoxStyle" TargetType="{x:Type ListBox}">
+            <Setter Property="Background" Value="#111111" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
+            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto" />
+            <Setter Property="ScrollViewer.CanContentScroll" Value="True" />
+            <Setter Property="VirtualizingPanel.IsVirtualizing" Value="True" />
+            <Setter Property="VirtualizingPanel.VirtualizationMode" Value="Recycling" />
+            <Setter Property="VirtualizingPanel.ScrollUnit" Value="Pixel" />
+            <Setter Property="VirtualizingPanel.CacheLength" Value="2" />
+            <Setter Property="VirtualizingPanel.CacheLengthUnit" Value="Page" />
+            <Setter Property="ItemContainerStyle" Value="{StaticResource ComicPageListBoxItemStyle}" />
+            <Setter Property="ItemsPanel">
+                <Setter.Value>
+                    <ItemsPanelTemplate>
+                        <VirtualizingStackPanel Orientation="Vertical" />
+                    </ItemsPanelTemplate>
+                </Setter.Value>
+            </Setter>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type ListBox}">
+                        <ScrollViewer x:Name="PART_ScrollViewer"
+                                      Background="{TemplateBinding Background}"
+                                      CanContentScroll="{TemplateBinding ScrollViewer.CanContentScroll}"
+                                      HorizontalScrollBarVisibility="{TemplateBinding ScrollViewer.HorizontalScrollBarVisibility}"
+                                      Padding="{TemplateBinding Padding}"
+                                      Style="{StaticResource ComicScrollViewerStyle}"
+                                      VerticalScrollBarVisibility="{TemplateBinding ScrollViewer.VerticalScrollBarVisibility}">
+                            <ItemsPresenter />
+                        </ScrollViewer>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
@@ -317,49 +371,89 @@
                        Text="请选择 zip 或 rar 漫画压缩包" />
         </DockPanel>
 
-        <ScrollViewer x:Name="ImageScrollViewer"
-                      Grid.Row="1"
-                      Background="#111111"
-                      HorizontalScrollBarVisibility="Disabled"
-                      VerticalScrollBarVisibility="Auto"
-                      CanContentScroll="False"
-                      Style="{StaticResource ComicScrollViewerStyle}"
-                      ScrollChanged="ImageScrollViewer_ScrollChanged"
-                      PreviewMouseWheel="ImageScrollViewer_PreviewMouseWheel"
-                      SizeChanged="ImageScrollViewer_SizeChanged">
-            <ItemsControl x:Name="ImagesItemsControl"
-                          ItemsSource="{Binding Pages}">
-                <ItemsControl.ItemsPanel>
-                    <ItemsPanelTemplate>
-                        <StackPanel Orientation="Vertical" />
-                    </ItemsPanelTemplate>
-                </ItemsControl.ItemsPanel>
-                <ItemsControl.ItemTemplate>
-                    <DataTemplate>
-                        <Grid Width="{Binding DisplayWidth}"
-                              Height="{Binding DisplayHeight}"
-                              HorizontalAlignment="Left"
-                              Background="#050505"
-                              SnapsToDevicePixels="True"
-                              UseLayoutRounding="True">
-                            <Image Source="{Binding Image}"
-                                   Stretch="Fill">
+        <ListBox x:Name="PagesListBox"
+                 Grid.Row="1"
+                 ItemsSource="{Binding Pages}"
+                 PreviewMouseWheel="ImageScrollViewer_PreviewMouseWheel"
+                 ScrollViewer.ScrollChanged="ImageScrollViewer_ScrollChanged"
+                 SizeChanged="ImageScrollViewer_SizeChanged"
+                 Style="{StaticResource ComicPagesListBoxStyle}">
+            <ListBox.ItemTemplate>
+                <DataTemplate>
+                    <Grid Width="{Binding DisplayWidth}"
+                          Height="{Binding DisplayHeight}"
+                          HorizontalAlignment="Left"
+                          Background="#050505"
+                          SnapsToDevicePixels="True"
+                          UseLayoutRounding="True">
+                        <Image Source="{Binding Image}"
+                               Stretch="Fill">
+                            <Image.Style>
+                                <Style TargetType="Image">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsImage}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Image.Style>
+                        </Image>
+
+                        <Grid Background="Transparent"
+                              MouseLeftButtonDown="VideoSurface_MouseLeftButtonDown">
+                            <Grid.Style>
+                                <Style TargetType="Grid">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsVideo}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Grid.Style>
+
+                            <Image Source="{Binding VideoFrame}"
+                                   Stretch="Uniform"
+                                   IsHitTestVisible="False">
                                 <Image.Style>
                                     <Style TargetType="Image">
-                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Setter Property="Visibility" Value="Visible" />
                                         <Style.Triggers>
-                                            <DataTrigger Binding="{Binding IsImage}" Value="True">
-                                                <Setter Property="Visibility" Value="Visible" />
+                                            <DataTrigger Binding="{Binding VideoFrame}" Value="{x:Null}">
+                                                <Setter Property="Visibility" Value="Collapsed" />
                                             </DataTrigger>
                                         </Style.Triggers>
                                     </Style>
                                 </Image.Style>
                             </Image>
 
-                            <Grid Background="Transparent"
-                                  MouseLeftButtonDown="VideoSurface_MouseLeftButtonDown">
-                                <Grid.Style>
-                                    <Style TargetType="Grid">
+                            <Button HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    CommandParameter="{Binding}"
+                                    Style="{StaticResource PlayOverlayButtonStyle}"
+                                    Click="PlayVideoButton_Click" />
+                        </Grid>
+
+                        <StackPanel HorizontalAlignment="Left"
+                                    VerticalAlignment="Bottom"
+                                    Margin="8"
+                                    Orientation="Horizontal"
+                                    IsHitTestVisible="False">
+                            <Border Padding="8,3"
+                                    Background="#99000000"
+                                    CornerRadius="3">
+                                <TextBlock Foreground="White"
+                                           FontSize="13"
+                                           FontWeight="SemiBold"
+                                           Text="{Binding DisplayNumber}" />
+                            </Border>
+                            <Border Margin="6,0,0,0"
+                                    Padding="8,3"
+                                    Background="#99000000"
+                                    CornerRadius="3">
+                                <Border.Style>
+                                    <Style TargetType="Border">
                                         <Setter Property="Visibility" Value="Collapsed" />
                                         <Style.Triggers>
                                             <DataTrigger Binding="{Binding IsVideo}" Value="True">
@@ -367,68 +461,17 @@
                                             </DataTrigger>
                                         </Style.Triggers>
                                     </Style>
-                                </Grid.Style>
-
-                                <Image Source="{Binding VideoFrame}"
-                                       Stretch="Uniform"
-                                       IsHitTestVisible="False">
-                                    <Image.Style>
-                                        <Style TargetType="Image">
-                                            <Setter Property="Visibility" Value="Visible" />
-                                            <Style.Triggers>
-                                                <DataTrigger Binding="{Binding VideoFrame}" Value="{x:Null}">
-                                                    <Setter Property="Visibility" Value="Collapsed" />
-                                                </DataTrigger>
-                                            </Style.Triggers>
-                                        </Style>
-                                    </Image.Style>
-                                </Image>
-
-                                <Button HorizontalAlignment="Center"
-                                        VerticalAlignment="Center"
-                                        CommandParameter="{Binding}"
-                                        Style="{StaticResource PlayOverlayButtonStyle}"
-                                        Click="PlayVideoButton_Click" />
-                            </Grid>
-
-                            <StackPanel HorizontalAlignment="Left"
-                                        VerticalAlignment="Bottom"
-                                        Margin="8"
-                                        Orientation="Horizontal"
-                                        IsHitTestVisible="False">
-                                <Border Padding="8,3"
-                                        Background="#99000000"
-                                        CornerRadius="3">
-                                    <TextBlock Foreground="White"
-                                               FontSize="13"
-                                               FontWeight="SemiBold"
-                                               Text="{Binding DisplayNumber}" />
-                                </Border>
-                                <Border Margin="6,0,0,0"
-                                        Padding="8,3"
-                                        Background="#99000000"
-                                        CornerRadius="3">
-                                    <Border.Style>
-                                        <Style TargetType="Border">
-                                            <Setter Property="Visibility" Value="Collapsed" />
-                                            <Style.Triggers>
-                                                <DataTrigger Binding="{Binding IsVideo}" Value="True">
-                                                    <Setter Property="Visibility" Value="Visible" />
-                                                </DataTrigger>
-                                            </Style.Triggers>
-                                        </Style>
-                                    </Border.Style>
-                                    <TextBlock Foreground="White"
-                                               FontSize="13"
-                                               FontWeight="SemiBold"
-                                               Text="{Binding VideoTimeText}" />
-                                </Border>
-                            </StackPanel>
-                        </Grid>
-                    </DataTemplate>
-                </ItemsControl.ItemTemplate>
-            </ItemsControl>
-        </ScrollViewer>
+                                </Border.Style>
+                                <TextBlock Foreground="White"
+                                           FontSize="13"
+                                           FontWeight="SemiBold"
+                                           Text="{Binding VideoTimeText}" />
+                            </Border>
+                        </StackPanel>
+                    </Grid>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
 
         <Grid x:Name="PasswordOverlay"
               Grid.Row="1"

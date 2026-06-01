@@ -15,6 +15,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using VlcMedia = LibVLCSharp.Shared.Media;
 using VlcMediaPlayer = LibVLCSharp.Shared.MediaPlayer;
 
@@ -27,6 +28,8 @@ public partial class MainWindow : Window
     private const double MouseWheelScrollMultiplier = 5d;
     private const double MouseWheelPixelsPerLine = 16d;
     private const int MinimumDecodePixelWidth = 480;
+    private const long MaxCachedVideoBytes = 128L * 1024 * 1024;
+    private static readonly TimeSpan PageWidthUpdateDelay = TimeSpan.FromMilliseconds(120);
 
     private static readonly HashSet<string> ImageExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -57,17 +60,21 @@ public partial class MainWindow : Window
     private int _cacheWindowEnd = -1;
     private int? _loadingWindowStart;
     private int? _loadingWindowEnd;
-    private int _cacheLoadVersion;
-    private int _activeCacheLoadVersion;
-    private int _coverLoadVersion;
     private double _pageWidth = 800;
     private bool _isArchiveLoading;
-    private bool _memoryCleanupScheduled;
     private bool _isCacheLoadWorkerRunning;
     private int _pendingCachePageIndex = -1;
     private TaskCompletionSource<string?>? _passwordPromptCompletion;
+    private ScrollViewer? _pagesScrollViewer;
+    private CancellationTokenSource? _cacheLoadCts;
+    private CancellationTokenSource? _coverLoadCts;
+    private double _pendingPageWidth;
     private readonly LibVLC _libVlc;
     private readonly SemaphoreSlim _coverLoadSemaphore = new(1, 1);
+    private readonly DispatcherTimer _pageWidthUpdateTimer = new()
+    {
+        Interval = PageWidthUpdateDelay
+    };
 
     public ObservableCollection<ComicPage> Pages { get; } = [];
 
@@ -79,6 +86,7 @@ public partial class MainWindow : Window
         _libVlc = new LibVLC();
         InitializeComponent();
         DataContext = this;
+        _pageWidthUpdateTimer.Tick += PageWidthUpdateTimer_Tick;
         LoadPasswordHistory();
         Loaded += MainWindow_Loaded;
         Closed += (_, _) =>
@@ -86,8 +94,9 @@ public partial class MainWindow : Window
             _archivePath = null;
             _loadingWindowStart = null;
             _loadingWindowEnd = null;
-            _cacheLoadVersion++;
-            _coverLoadVersion++;
+            CancelCacheLoads();
+            _cacheLoadCts?.Dispose();
+            _coverLoadCts?.Dispose();
             StopAllVideos();
             _libVlc.Dispose();
         };
@@ -95,6 +104,8 @@ public partial class MainWindow : Window
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
+        InitializePagesScrollViewer();
+
         var archivePath = Environment.GetCommandLineArgs().Skip(1).FirstOrDefault();
         if (!string.IsNullOrWhiteSpace(archivePath) && File.Exists(archivePath))
         {
@@ -146,6 +157,34 @@ public partial class MainWindow : Window
         MaximizeRestoreWindowButton.Content = WindowState == WindowState.Maximized
             ? "\uE923"
             : "\uE922";
+        Dispatcher.BeginInvoke((Action)(() => UpdatePageWidth()), DispatcherPriority.Loaded);
+    }
+
+    private void MainWindow_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (PasswordOverlay.Visibility == Visibility.Visible
+            || _isArchiveLoading
+            || Pages.Count == 0
+            || _archivePath is null)
+        {
+            return;
+        }
+
+        var pageOffset = e.Key switch
+        {
+            Key.PageUp => -1,
+            Key.PageDown => 1,
+            _ => 0
+        };
+
+        if (pageOffset == 0)
+        {
+            return;
+        }
+
+        var targetPageIndex = Math.Clamp(GetCurrentPageIndex() + pageOffset, 0, Pages.Count - 1);
+        ScrollPageToTop(targetPageIndex);
+        e.Handled = true;
     }
 
     private async Task LoadArchiveWithPasswordRetryAsync(string archivePath)
@@ -159,9 +198,7 @@ public partial class MainWindow : Window
                 _isArchiveLoading = true;
                 SetLoadingState(true, $"正在读取目录 {Path.GetFileName(archivePath)} ...");
                 UpdatePageWidth();
-                _cacheLoadVersion++;
-                _activeCacheLoadVersion = 0;
-                _coverLoadVersion++;
+                CancelCacheLoads();
                 _pendingCachePageIndex = -1;
                 _loadingWindowStart = null;
                 _loadingWindowEnd = null;
@@ -177,9 +214,7 @@ public partial class MainWindow : Window
                 _cacheWindowEnd = -1;
                 _loadingWindowStart = null;
                 _loadingWindowEnd = null;
-                _cacheLoadVersion++;
-                _activeCacheLoadVersion = 0;
-                _coverLoadVersion++;
+                CancelCacheLoads();
                 _pendingCachePageIndex = -1;
 
                 Pages.Clear();
@@ -188,7 +223,7 @@ public partial class MainWindow : Window
                     Pages.Add(page);
                 }
 
-                ImageScrollViewer.ScrollToTop();
+                GetPagesScrollViewer()?.ScrollToTop();
                 UpdatePageWidth();
                 if (Pages.Count == 0)
                 {
@@ -243,9 +278,7 @@ public partial class MainWindow : Window
         _loadingWindowEnd = null;
         _cacheWindowStart = -1;
         _cacheWindowEnd = -1;
-        _cacheLoadVersion++;
-        _activeCacheLoadVersion = 0;
-        _coverLoadVersion++;
+        CancelCacheLoads();
         _pendingCachePageIndex = -1;
         StopAllVideos();
         Pages.Clear();
@@ -279,7 +312,10 @@ public partial class MainWindow : Window
     }
 
     private static string PasswordHistoryFilePath =>
-        Path.Combine(AppContext.BaseDirectory, "password-history.json");
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "ComicViewer",
+            "password-history.json");
 
     private void LoadPasswordHistory()
     {
@@ -337,6 +373,7 @@ public partial class MainWindow : Window
             {
                 WriteIndented = true
             });
+            Directory.CreateDirectory(Path.GetDirectoryName(PasswordHistoryFilePath)!);
             File.WriteAllText(PasswordHistoryFilePath, json);
         }
         catch
@@ -416,8 +453,8 @@ public partial class MainWindow : Window
         string? password,
         IReadOnlyList<ImageLoadRequest> requests,
         int decodePixelWidth,
-        Action<int, BitmapImage>? imageLoaded = null,
-        Func<bool>? shouldContinue = null)
+        Action<int, string, BitmapImage>? imageLoaded = null,
+        CancellationToken cancellationToken = default)
     {
         if (requests.Count == 0)
         {
@@ -440,10 +477,7 @@ public partial class MainWindow : Window
         using var archive = ArchiveFactory.OpenArchive(archivePath, options);
         foreach (var entry in archive.Entries.Where(entry => !entry.IsDirectory && entry.Key is not null))
         {
-            if (shouldContinue?.Invoke() == false)
-            {
-                break;
-            }
+            cancellationToken.ThrowIfCancellationRequested();
 
             if (!requestedPagesByKey.TryGetValue(entry.Key!, out var pageIndex))
             {
@@ -452,16 +486,10 @@ public partial class MainWindow : Window
 
             using var entryStream = entry.OpenEntryStream();
             using var memoryStream = new MemoryStream();
-            if (!TryCopyToMemoryStream(entryStream, memoryStream, shouldContinue))
-            {
-                break;
-            }
+            TryCopyToMemoryStream(entryStream, memoryStream, cancellationToken);
 
             memoryStream.Position = 0;
-            if (shouldContinue?.Invoke() == false)
-            {
-                break;
-            }
+            cancellationToken.ThrowIfCancellationRequested();
 
             var image = new BitmapImage();
             image.BeginInit();
@@ -471,7 +499,7 @@ public partial class MainWindow : Window
             image.EndInit();
             image.Freeze();
             images[pageIndex] = image;
-            imageLoaded?.Invoke(pageIndex, image);
+            imageLoaded?.Invoke(pageIndex, entry.Key!, image);
 
             if (images.Count == requestedPagesByKey.Count)
             {
@@ -482,39 +510,39 @@ public partial class MainWindow : Window
         return images;
     }
 
-    private static bool TryCopyToMemoryStream(Stream source, MemoryStream destination, Func<bool>? shouldContinue)
+    private static void TryCopyToMemoryStream(Stream source, MemoryStream destination, CancellationToken cancellationToken = default)
     {
         var buffer = new byte[128 * 1024];
         while (true)
         {
-            if (shouldContinue?.Invoke() == false)
-            {
-                return false;
-            }
+            cancellationToken.ThrowIfCancellationRequested();
 
             var bytesRead = source.Read(buffer, 0, buffer.Length);
             if (bytesRead == 0)
             {
-                return true;
+                return;
             }
 
             destination.Write(buffer, 0, bytesRead);
         }
     }
 
-    private MemoryStream LoadVideoToMemory(ComicPage page, Func<bool>? shouldContinue = null)
+    private MemoryStream LoadVideoToMemory(ComicPage page, CancellationToken cancellationToken = default)
     {
-        if (_archivePath is null)
+        cancellationToken.ThrowIfCancellationRequested();
+        var archivePath = _archivePath;
+        var password = _password;
+        if (archivePath is null)
         {
             throw new InvalidOperationException("还没有打开压缩包。");
         }
 
         var options = new ReaderOptions
         {
-            Password = _password
+            Password = password
         };
 
-        using var archive = ArchiveFactory.OpenArchive(_archivePath, options);
+        using var archive = ArchiveFactory.OpenArchive(archivePath, options);
         var entry = archive.Entries.FirstOrDefault(entry => !entry.IsDirectory && string.Equals(entry.Key, page.EntryKey, StringComparison.Ordinal));
         if (entry is null)
         {
@@ -523,14 +551,17 @@ public partial class MainWindow : Window
 
         using var entryStream = entry.OpenEntryStream();
         var memoryStream = new MemoryStream();
-        if (!TryCopyToMemoryStream(entryStream, memoryStream, shouldContinue))
+        try
+        {
+            TryCopyToMemoryStream(entryStream, memoryStream, cancellationToken);
+            memoryStream.Position = 0;
+            return memoryStream;
+        }
+        catch
         {
             memoryStream.Dispose();
-            throw new OperationCanceledException();
+            throw;
         }
-
-        memoryStream.Position = 0;
-        return memoryStream;
     }
 
     private VideoPlaybackSession CreateMemoryVideoPlaybackSession(ComicPage page, MemoryStream videoStream, bool disableAudio)
@@ -605,11 +636,15 @@ public partial class MainWindow : Window
     {
         try
         {
+            CancelCoverLoads();
+            var cachedVideoStream = page.TryTakeCachedVideoStream();
             page.StopVideo();
             StopOtherVideos(page);
             page.StopCoverSession();
-            StatusTextBlock.Text = $"正在载入视频到内存 {Path.GetFileName(page.EntryKey)} ...";
-            var videoStream = await Task.Run(() => LoadVideoToMemory(page));
+            StatusTextBlock.Text = cachedVideoStream is null
+                ? $"正在载入视频到内存 {Path.GetFileName(page.EntryKey)} ..."
+                : $"正在准备播放 {Path.GetFileName(page.EntryKey)} ...";
+            var videoStream = cachedVideoStream ?? await Task.Run(() => LoadVideoToMemory(page));
             var session = CreateMemoryVideoPlaybackSession(page, videoStream, disableAudio: false);
             page.SetVideoPlaybackSession(session);
             AttachPlaybackEvents(page, session);
@@ -739,26 +774,276 @@ public partial class MainWindow : Window
         }
     }
 
+    private CancellationTokenSource BeginCacheLoad()
+    {
+        CancelCacheLoads();
+        _cacheLoadCts = new CancellationTokenSource();
+        return _cacheLoadCts;
+    }
+
+    private void CancelCacheLoads()
+    {
+        var cts = _cacheLoadCts;
+        _cacheLoadCts = null;
+        cts?.Cancel();
+        cts?.Dispose();
+        CancelCoverLoads();
+    }
+
+    private void FinishCacheLoad(CancellationTokenSource cts)
+    {
+        if (ReferenceEquals(_cacheLoadCts, cts))
+        {
+            _cacheLoadCts = null;
+        }
+
+        cts.Dispose();
+    }
+
+    private CancellationTokenSource BeginCoverLoad()
+    {
+        CancelCoverLoads();
+        _coverLoadCts = new CancellationTokenSource();
+        return _coverLoadCts;
+    }
+
+    private void CancelCoverLoads()
+    {
+        var cts = _coverLoadCts;
+        _coverLoadCts = null;
+        cts?.Cancel();
+        cts?.Dispose();
+    }
+
+    private void FinishCoverLoad(CancellationTokenSource cts)
+    {
+        if (ReferenceEquals(_coverLoadCts, cts))
+        {
+            _coverLoadCts = null;
+        }
+
+        cts.Dispose();
+    }
+
+    private void InitializePagesScrollViewer()
+    {
+        _pagesScrollViewer = GetPagesScrollViewer();
+    }
+
+    private ScrollViewer? GetPagesScrollViewer()
+    {
+        if (_pagesScrollViewer is not null)
+        {
+            return _pagesScrollViewer;
+        }
+
+        PagesListBox.ApplyTemplate();
+        _pagesScrollViewer = FindVisualChild<ScrollViewer>(PagesListBox);
+        return _pagesScrollViewer;
+    }
+
+    private double GetVerticalOffset()
+    {
+        return GetPagesScrollViewer()?.VerticalOffset ?? 0d;
+    }
+
+    private int GetCurrentPageIndex()
+    {
+        return TryGetFirstVisiblePageIndex() ?? GetPageIndexAtOffset(GetVerticalOffset());
+    }
+
+    private void ScrollPageToTop(int pageIndex)
+    {
+        if (pageIndex < 0 || pageIndex >= Pages.Count)
+        {
+            return;
+        }
+
+        PagesListBox.ScrollIntoView(Pages[pageIndex]);
+        Dispatcher.BeginInvoke((Action)(() =>
+        {
+            AlignRealizedPageToTop(pageIndex);
+            UpdateReadingStatus(pageIndex);
+            QueueCacheWindowLoad(pageIndex);
+        }), DispatcherPriority.Loaded);
+    }
+
+    private void AlignRealizedPageToTop(int pageIndex)
+    {
+        var scrollViewer = GetPagesScrollViewer();
+        if (scrollViewer is null)
+        {
+            return;
+        }
+
+        PagesListBox.UpdateLayout();
+        if (PagesListBox.ItemContainerGenerator.ContainerFromIndex(pageIndex) is not FrameworkElement container)
+        {
+            return;
+        }
+
+        Rect bounds;
+        try
+        {
+            bounds = container.TransformToAncestor(scrollViewer)
+                .TransformBounds(new Rect(0, 0, container.ActualWidth, container.ActualHeight));
+        }
+        catch (InvalidOperationException)
+        {
+            return;
+        }
+
+        scrollViewer.ScrollToVerticalOffset(scrollViewer.VerticalOffset + bounds.Top);
+    }
+
+    private int? TryGetFirstVisiblePageIndex()
+    {
+        var scrollViewer = GetPagesScrollViewer();
+        if (scrollViewer is null || Pages.Count == 0)
+        {
+            return null;
+        }
+
+        var bestIndex = -1;
+        var bestTop = double.PositiveInfinity;
+        foreach (var container in FindVisualChildren<ListBoxItem>(PagesListBox))
+        {
+            if (container.ActualHeight <= 0)
+            {
+                continue;
+            }
+
+            var index = PagesListBox.ItemContainerGenerator.IndexFromContainer(container);
+            if (index < 0 || index >= Pages.Count)
+            {
+                continue;
+            }
+
+            Rect bounds;
+            try
+            {
+                bounds = container.TransformToAncestor(scrollViewer)
+                    .TransformBounds(new Rect(0, 0, container.ActualWidth, container.ActualHeight));
+            }
+            catch (InvalidOperationException)
+            {
+                continue;
+            }
+
+            if (bounds.Bottom <= 0 || bounds.Top >= scrollViewer.ViewportHeight)
+            {
+                continue;
+            }
+
+            if (bounds.Top < bestTop)
+            {
+                bestTop = bounds.Top;
+                bestIndex = index;
+            }
+        }
+
+        return bestIndex >= 0 ? bestIndex : null;
+    }
+
+    private static IEnumerable<T> FindVisualChildren<T>(DependencyObject parent)
+        where T : DependencyObject
+    {
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, i);
+            if (child is T typedChild)
+            {
+                yield return typedChild;
+            }
+
+            foreach (var nestedChild in FindVisualChildren<T>(child))
+            {
+                yield return nestedChild;
+            }
+        }
+    }
+
+    private static T? FindVisualChild<T>(DependencyObject parent)
+        where T : DependencyObject
+    {
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, i);
+            if (child is T typedChild)
+            {
+                return typedChild;
+            }
+
+            var nestedChild = FindVisualChild<T>(child);
+            if (nestedChild is not null)
+            {
+                return nestedChild;
+            }
+        }
+
+        return null;
+    }
+
     private void ImageScrollViewer_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        UpdatePageWidth(e.NewSize.Width);
+        SchedulePageWidthUpdate(e.NewSize.Width);
     }
 
     private void ImageScrollViewer_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
     {
+        var scrollViewer = GetPagesScrollViewer();
+        if (scrollViewer is null)
+        {
+            return;
+        }
+
         var wheelLines = SystemParameters.WheelScrollLines > 0
             ? SystemParameters.WheelScrollLines
             : 3;
         var deltaSteps = e.Delta / (double)System.Windows.Input.Mouse.MouseWheelDeltaForOneLine;
         var scrollPixels = deltaSteps * wheelLines * MouseWheelPixelsPerLine * MouseWheelScrollMultiplier;
 
-        ImageScrollViewer.ScrollToVerticalOffset(ImageScrollViewer.VerticalOffset - scrollPixels);
+        scrollViewer.ScrollToVerticalOffset(scrollViewer.VerticalOffset - scrollPixels);
         e.Handled = true;
     }
 
     private void UpdatePageWidth(double fallbackWidth = 0)
     {
-        var width = ImageScrollViewer.ViewportWidth;
+        _pageWidthUpdateTimer.Stop();
+        var width = ResolvePageWidth(fallbackWidth);
+        _pageWidth = width;
+        ResizeAllPages(width);
+    }
+
+    private void SchedulePageWidthUpdate(double fallbackWidth)
+    {
+        var width = ResolvePageWidth(fallbackWidth);
+        if (Math.Abs(_pageWidth - width) <= 0.1)
+        {
+            return;
+        }
+
+        _pageWidth = width;
+        _pendingPageWidth = width;
+        ResizeRealizedPages(width);
+        _pageWidthUpdateTimer.Stop();
+        _pageWidthUpdateTimer.Start();
+    }
+
+    private void PageWidthUpdateTimer_Tick(object? sender, EventArgs e)
+    {
+        _pageWidthUpdateTimer.Stop();
+        ResizeAllPages(_pendingPageWidth > 0 ? _pendingPageWidth : _pageWidth);
+    }
+
+    private double ResolvePageWidth(double fallbackWidth = 0)
+    {
+        // Prefer the inner ScrollViewer viewport; during template/layout transitions it can
+        // briefly be unavailable, so fall back through the size-change payload, the ListBox
+        // width, and finally the window width to keep page sizing usable during startup/state changes.
+        // The custom scrollbar overlays the content, so it does not reserve layout width here.
+        var scrollViewer = GetPagesScrollViewer();
+        var width = scrollViewer?.ViewportWidth ?? 0;
         if (double.IsNaN(width) || width <= 1)
         {
             width = fallbackWidth;
@@ -766,7 +1051,7 @@ public partial class MainWindow : Window
 
         if (double.IsNaN(width) || width <= 1)
         {
-            width = ImageScrollViewer.ActualWidth;
+            width = PagesListBox.ActualWidth;
         }
 
         if (double.IsNaN(width) || width <= 1)
@@ -774,11 +1059,25 @@ public partial class MainWindow : Window
             width = ActualWidth;
         }
 
-        _pageWidth = Math.Max(1, width);
-        ImagesItemsControl.Width = _pageWidth;
+        return Math.Max(1, width);
+    }
+
+    private void ResizeAllPages(double pageWidth)
+    {
         foreach (var page in Pages)
         {
-            page.Resize(_pageWidth);
+            page.Resize(pageWidth);
+        }
+    }
+
+    private void ResizeRealizedPages(double pageWidth)
+    {
+        foreach (var container in FindVisualChildren<ListBoxItem>(PagesListBox))
+        {
+            if (container.DataContext is ComicPage page)
+            {
+                page.Resize(pageWidth);
+            }
         }
     }
 
@@ -789,7 +1088,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var currentPageIndex = GetPageIndexAtOffset(ImageScrollViewer.VerticalOffset);
+        var currentPageIndex = GetCurrentPageIndex();
         UpdateReadingStatus(currentPageIndex);
         QueueCacheWindowLoad(currentPageIndex);
     }
@@ -799,7 +1098,7 @@ public partial class MainWindow : Window
         var window = GetPreloadWindow(currentPageIndex);
         if (_loadingWindowStart == window.Start
             && _loadingWindowEnd == window.End
-            && _activeCacheLoadVersion == _cacheLoadVersion)
+            && _cacheLoadCts?.IsCancellationRequested == false)
         {
             return;
         }
@@ -810,8 +1109,7 @@ public partial class MainWindow : Window
         }
 
         _pendingCachePageIndex = currentPageIndex;
-        _cacheLoadVersion++;
-        _coverLoadVersion++;
+        CancelCacheLoads();
         if (_isCacheLoadWorkerRunning)
         {
             return;
@@ -839,7 +1137,7 @@ public partial class MainWindow : Window
                 var window = GetPreloadWindow(currentPageIndex);
                 if (_loadingWindowStart == window.Start
                     && _loadingWindowEnd == window.End
-                    && _activeCacheLoadVersion == _cacheLoadVersion)
+                    && _cacheLoadCts?.IsCancellationRequested == false)
                 {
                     continue;
                 }
@@ -852,7 +1150,7 @@ public partial class MainWindow : Window
                 await LoadCacheWindowAsync(window.Start, window.End, currentPageIndex);
                 if (!_isArchiveLoading && Pages.Count > 0 && _archivePath is not null)
                 {
-                    UpdateReadingStatus(GetPageIndexAtOffset(ImageScrollViewer.VerticalOffset));
+                    UpdateReadingStatus(GetCurrentPageIndex());
                 }
             }
         }
@@ -869,22 +1167,26 @@ public partial class MainWindow : Window
 
     private async Task LoadCacheWindowAsync(int windowStart, int windowEnd, int currentPageIndex, bool showErrors = true)
     {
-        if (_archivePath is null || Pages.Count == 0)
+        var archivePath = _archivePath;
+        if (archivePath is null || Pages.Count == 0)
         {
             return;
         }
 
         windowStart = Math.Clamp(windowStart, 0, Pages.Count - 1);
         windowEnd = Math.Clamp(windowEnd, windowStart, Pages.Count - 1);
-        if (_loadingWindowStart == windowStart && _loadingWindowEnd == windowEnd)
+        if (_loadingWindowStart == windowStart
+            && _loadingWindowEnd == windowEnd
+            && _cacheLoadCts?.IsCancellationRequested == false)
         {
             return;
         }
 
+        var cacheLoadCts = BeginCacheLoad();
+        var cancellationToken = cacheLoadCts.Token;
+        var password = _password;
         _loadingWindowStart = windowStart;
         _loadingWindowEnd = windowEnd;
-        var version = ++_cacheLoadVersion;
-        _activeCacheLoadVersion = version;
         var pageSnapshot = Pages.ToList();
         PruneMediaOutsideWindow(windowStart, windowEnd);
         var requests = CreateImageLoadRequests(pageSnapshot, windowStart, windowEnd - windowStart + 1, onlyMissing: true);
@@ -892,35 +1194,38 @@ public partial class MainWindow : Window
         try
         {
             var loadedImages = await Task.Run(() => LoadImagesFromArchive(
-                _archivePath,
-                _password,
+                archivePath,
+                password,
                 requests,
                 GetDecodePixelWidth(),
-                (pageIndex, image) => Dispatcher.BeginInvoke(new Action(() =>
+                (pageIndex, entryKey, image) => Dispatcher.BeginInvoke(new Action(() =>
                 {
-                    if (version != _cacheLoadVersion
+                    if (cancellationToken.IsCancellationRequested
+                        || !string.Equals(_archivePath, archivePath, StringComparison.Ordinal)
                         || pageIndex < windowStart
                         || pageIndex > windowEnd
                         || pageIndex >= Pages.Count
-                        || !Pages[pageIndex].IsImage)
+                        || !Pages[pageIndex].IsImage
+                        || !string.Equals(Pages[pageIndex].EntryKey, entryKey, StringComparison.Ordinal))
                     {
                         return;
                     }
 
                     Pages[pageIndex].SetImage(image, _pageWidth);
-                    UpdateReadingStatus(GetPageIndexAtOffset(ImageScrollViewer.VerticalOffset));
+                    UpdateReadingStatus(GetCurrentPageIndex());
                 })),
-                () => version == _cacheLoadVersion));
-            if (version != _cacheLoadVersion)
-            {
-                return;
-            }
+                cancellationToken), cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
 
             ApplyLoadedImages(loadedImages, windowStart, windowEnd);
             _cacheWindowStart = windowStart;
             _cacheWindowEnd = windowEnd;
-            var coverVersion = ++_coverLoadVersion;
-            _ = ScheduleVideoCoversAsync(windowStart, windowEnd, coverVersion, currentPageIndex);
+            var coverLoadCts = BeginCoverLoad();
+            _ = ScheduleVideoCoversAsync(windowStart, windowEnd, coverLoadCts, currentPageIndex);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return;
         }
         catch (Exception ex)
         {
@@ -929,7 +1234,7 @@ public partial class MainWindow : Window
                 throw;
             }
 
-            if (version != _cacheLoadVersion)
+            if (cancellationToken.IsCancellationRequested)
             {
                 return;
             }
@@ -939,16 +1244,15 @@ public partial class MainWindow : Window
         }
         finally
         {
-            if (_loadingWindowStart == windowStart && _loadingWindowEnd == windowEnd)
+            if (ReferenceEquals(_cacheLoadCts, cacheLoadCts)
+                && _loadingWindowStart == windowStart
+                && _loadingWindowEnd == windowEnd)
             {
                 _loadingWindowStart = null;
                 _loadingWindowEnd = null;
             }
 
-            if (_activeCacheLoadVersion == version)
-            {
-                _activeCacheLoadVersion = 0;
-            }
+            FinishCacheLoad(cacheLoadCts);
         }
     }
 
@@ -970,7 +1274,6 @@ public partial class MainWindow : Window
 
     private void PruneMediaOutsideWindow(int windowStart, int windowEnd)
     {
-        var unloadedAnyMedia = false;
         for (var i = 0; i < Pages.Count; i++)
         {
             if (i >= windowStart && i <= windowEnd)
@@ -981,20 +1284,14 @@ public partial class MainWindow : Window
             var page = Pages[i];
             if (page.IsImage)
             {
-                unloadedAnyMedia |= page.IsImageLoaded;
                 page.SetImage(null, _pageWidth);
             }
             else if (page.IsVideo)
             {
-                unloadedAnyMedia |= page.VideoFrame is not null;
                 page.StopCoverSession();
                 page.ClearVideoFrame();
+                page.ClearCachedVideoData();
             }
-        }
-
-        if (unloadedAnyMedia)
-        {
-            ScheduleMemoryCleanup();
         }
     }
 
@@ -1004,28 +1301,13 @@ public partial class MainWindow : Window
         return Math.Max(MinimumDecodePixelWidth, (int)Math.Ceiling(_pageWidth * dpiScale));
     }
 
-    private void ScheduleMemoryCleanup()
+    private async Task ScheduleVideoCoversAsync(int windowStart, int windowEnd, CancellationTokenSource coverLoadCts, int currentPageIndex)
     {
-        if (_memoryCleanupScheduled)
-        {
-            return;
-        }
-
-        _memoryCleanupScheduled = true;
-        _ = Dispatcher.InvokeAsync(async () =>
-        {
-            await Task.Delay(600);
-            _memoryCleanupScheduled = false;
-            GC.Collect(2, GCCollectionMode.Optimized, blocking: false);
-        });
-    }
-
-    private async Task ScheduleVideoCoversAsync(int windowStart, int windowEnd, int version, int currentPageIndex)
-    {
+        var cancellationToken = coverLoadCts.Token;
         try
         {
-            await Task.Delay(1200);
-            if (!IsCoverWindowCurrent(windowStart, windowEnd, version))
+            await Task.Delay(1200, cancellationToken);
+            if (!IsCoverWindowCurrent(windowStart, windowEnd, cancellationToken))
             {
                 return;
             }
@@ -1039,23 +1321,30 @@ public partial class MainWindow : Window
 
             foreach (var page in videoPages)
             {
-                if (!IsCoverWindowCurrent(windowStart, windowEnd, version))
+                if (!IsCoverWindowCurrent(windowStart, windowEnd, cancellationToken))
                 {
                     return;
                 }
 
-                await EnsureVideoCoverAsync(page, version);
+                await EnsureVideoCoverAsync(page, cancellationToken);
             }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
         }
         catch
         {
             // Video covers are best-effort and should never slow or break image reading.
         }
+        finally
+        {
+            FinishCoverLoad(coverLoadCts);
+        }
     }
 
-    private bool IsCoverWindowCurrent(int windowStart, int windowEnd, int version)
+    private bool IsCoverWindowCurrent(int windowStart, int windowEnd, CancellationToken cancellationToken)
     {
-        return version == _coverLoadVersion
+        return !cancellationToken.IsCancellationRequested
             && _loadingWindowStart is null
             && _cacheWindowStart == windowStart
             && _cacheWindowEnd == windowEnd
@@ -1178,7 +1467,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task EnsureVideoCoverAsync(ComicPage page, int version)
+    private async Task EnsureVideoCoverAsync(ComicPage page, CancellationToken cancellationToken)
     {
         if (!page.TryBeginCoverLoad())
         {
@@ -1189,15 +1478,15 @@ public partial class MainWindow : Window
         var semaphoreAcquired = false;
         try
         {
-            await _coverLoadSemaphore.WaitAsync();
+            await _coverLoadSemaphore.WaitAsync(cancellationToken);
             semaphoreAcquired = true;
-            if (version != _coverLoadVersion || page.IsVideoPlaying)
+            if (cancellationToken.IsCancellationRequested || page.IsVideoPlaying)
             {
                 return;
             }
 
-            var videoStream = await Task.Run(() => LoadVideoToMemory(page, () => version == _coverLoadVersion));
-            if (version != _coverLoadVersion || page.IsVideoPlaying)
+            var videoStream = await Task.Run(() => LoadVideoToMemory(page, cancellationToken), cancellationToken);
+            if (cancellationToken.IsCancellationRequested || page.IsVideoPlaying)
             {
                 videoStream.Dispose();
                 return;
@@ -1211,9 +1500,19 @@ public partial class MainWindow : Window
                 return;
             }
 
-            await session.Renderer.FirstFrameDisplayed.WaitAsync(TimeSpan.FromSeconds(4));
-            await Dispatcher.InvokeAsync(() => UpdateReadingStatus(GetPageIndexAtOffset(ImageScrollViewer.VerticalOffset)));
+            await session.Renderer.FirstFrameDisplayed.WaitAsync(TimeSpan.FromSeconds(4), cancellationToken);
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (!cancellationToken.IsCancellationRequested)
+                {
+                    UpdateReadingStatus(GetCurrentPageIndex());
+                }
+            });
             session.Stop();
+            page.TryCacheVideoData(videoStream, MaxCachedVideoBytes);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
         }
         catch
         {
@@ -1246,6 +1545,7 @@ public sealed class ComicPage : INotifyPropertyChanged
     private VideoPlaybackSession? _coverSession;
     private VlcMediaPlayer? _mediaPlayer;
     private ImageSource? _videoFrame;
+    private ArraySegment<byte>? _cachedVideoData;
     private bool _isCoverLoading;
     private bool _isVideoPaused;
     private bool _isVideoPlaying;
@@ -1491,6 +1791,39 @@ public sealed class ComicPage : INotifyPropertyChanged
         _isCoverLoading = false;
     }
 
+    public bool TryCacheVideoData(MemoryStream videoStream, long maxCachedBytes)
+    {
+        if (!IsVideo || videoStream.Length <= 0 || videoStream.Length > maxCachedBytes)
+        {
+            return false;
+        }
+
+        if (!videoStream.TryGetBuffer(out var buffer))
+        {
+            return false;
+        }
+
+        _cachedVideoData = new ArraySegment<byte>(buffer.Array!, buffer.Offset, (int)videoStream.Length);
+        return true;
+    }
+
+    public MemoryStream? TryTakeCachedVideoStream()
+    {
+        var cachedVideoData = _cachedVideoData;
+        _cachedVideoData = null;
+        if (cachedVideoData is not { Array: { } buffer })
+        {
+            return null;
+        }
+
+        return new MemoryStream(buffer, cachedVideoData.Value.Offset, cachedVideoData.Value.Count, writable: false);
+    }
+
+    public void ClearCachedVideoData()
+    {
+        _cachedVideoData = null;
+    }
+
     public void SetCoverSession(VideoPlaybackSession session)
     {
         DisposeSessionInBackground(_coverSession, stopFirst: true);
@@ -1534,6 +1867,7 @@ public sealed class ComicPage : INotifyPropertyChanged
         DisposeSessionInBackground(_videoPlaybackSession, stopFirst: true);
         _videoPlaybackSession = null;
         StopCoverSession();
+        ClearCachedVideoData();
     }
 
     public void Resize(double pageWidth)
@@ -1698,7 +2032,6 @@ public sealed class VideoFrameRenderer : IDisposable
         {
             var bitmap = new WriteableBitmap((int)_width, (int)_height, 96, 96, PixelFormats.Bgr32, null);
             _bitmap = bitmap;
-            _setFrame(bitmap);
             _setVideoSize(_width, _height);
         });
 
@@ -1765,6 +2098,7 @@ public sealed class VideoFrameRenderer : IDisposable
             }
 
             _bitmap.WritePixels(new Int32Rect(0, 0, (int)_width, (int)_height), _pendingFrame, (int)_pitch, 0);
+            _setFrame(_bitmap);
             _frameUpdateQueued = false;
             _firstFrameDisplayed.TrySetResult();
         }
