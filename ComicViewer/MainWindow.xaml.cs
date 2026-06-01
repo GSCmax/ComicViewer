@@ -68,6 +68,7 @@ public partial class MainWindow : Window
     private ScrollViewer? _pagesScrollViewer;
     private CancellationTokenSource? _cacheLoadCts;
     private CancellationTokenSource? _coverLoadCts;
+    private CancellationTokenSource? _videoPlayCts;
     private double _pendingPageWidth;
     private readonly LibVLC _libVlc;
     private readonly SemaphoreSlim _coverLoadSemaphore = new(1, 1);
@@ -95,8 +96,10 @@ public partial class MainWindow : Window
             _loadingWindowStart = null;
             _loadingWindowEnd = null;
             CancelCacheLoads();
+            CancelVideoPlayLoad();
             _cacheLoadCts?.Dispose();
             _coverLoadCts?.Dispose();
+            _videoPlayCts?.Dispose();
             StopAllVideos();
             _libVlc.Dispose();
         };
@@ -187,9 +190,9 @@ public partial class MainWindow : Window
         e.Handled = true;
     }
 
-    private async Task LoadArchiveWithPasswordRetryAsync(string archivePath)
+    private async Task LoadArchiveWithPasswordRetryAsync(string archivePath, string? initialPassword = null)
     {
-        string? password = null;
+        string? password = initialPassword;
 
         while (true)
         {
@@ -199,6 +202,7 @@ public partial class MainWindow : Window
                 SetLoadingState(true, $"正在读取目录 {Path.GetFileName(archivePath)} ...");
                 UpdatePageWidth();
                 CancelCacheLoads();
+                CancelVideoPlayLoad();
                 _pendingCachePageIndex = -1;
                 _loadingWindowStart = null;
                 _loadingWindowEnd = null;
@@ -279,6 +283,7 @@ public partial class MainWindow : Window
         _cacheWindowStart = -1;
         _cacheWindowEnd = -1;
         CancelCacheLoads();
+        CancelVideoPlayLoad();
         _pendingCachePageIndex = -1;
         StopAllVideos();
         Pages.Clear();
@@ -421,9 +426,19 @@ public partial class MainWindow : Window
         };
 
         using var archive = ArchiveFactory.OpenArchive(archivePath, options);
-        return archive.Entries
+        var mediaEntries = archive.Entries
             .Where(entry => !entry.IsDirectory && IsSupportedMediaFile(entry.Key))
             .OrderBy(entry => entry.Key, NaturalFileNameComparer.Instance)
+            .ToList();
+
+        var firstMediaEntry = mediaEntries.FirstOrDefault();
+        if (firstMediaEntry is not null)
+        {
+            using var entryStream = firstMediaEntry.OpenEntryStream();
+            _ = entryStream.ReadByte();
+        }
+
+        return mediaEntries
             .Select(entry => new ComicArchiveEntry(entry.Key!, GetMediaType(entry.Key!)))
             .ToList();
     }
@@ -634,6 +649,18 @@ public partial class MainWindow : Window
 
     private async Task PlayVideoFromMemoryAsync(ComicPage page)
     {
+        var archivePath = _archivePath;
+        if (archivePath is null)
+        {
+            return;
+        }
+
+        var videoPlayCts = BeginVideoPlayLoad();
+        var cancellationToken = videoPlayCts.Token;
+        MemoryStream? videoStream = null;
+        VideoPlaybackSession? session = null;
+        var sessionAssignedToPage = false;
+
         try
         {
             CancelCoverLoads();
@@ -644,9 +671,17 @@ public partial class MainWindow : Window
             StatusTextBlock.Text = cachedVideoStream is null
                 ? $"正在载入视频到内存 {Path.GetFileName(page.EntryKey)} ..."
                 : $"正在准备播放 {Path.GetFileName(page.EntryKey)} ...";
-            var videoStream = cachedVideoStream ?? await Task.Run(() => LoadVideoToMemory(page));
-            var session = CreateMemoryVideoPlaybackSession(page, videoStream, disableAudio: false);
+            videoStream = cachedVideoStream ?? await Task.Run(() => LoadVideoToMemory(page, cancellationToken), cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!IsVideoPlayRequestCurrent(videoPlayCts, archivePath, page))
+            {
+                return;
+            }
+
+            session = CreateMemoryVideoPlaybackSession(page, videoStream, disableAudio: false);
+            videoStream = null;
             page.SetVideoPlaybackSession(session);
+            sessionAssignedToPage = true;
             AttachPlaybackEvents(page, session);
             page.IsVideoPlaying = true;
             page.IsVideoPaused = false;
@@ -660,11 +695,47 @@ public partial class MainWindow : Window
 
             StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - 使用内存播放";
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
         catch (Exception ex)
         {
-            page.IsVideoPlaying = false;
+            if (!IsVideoPlayRequestCurrent(videoPlayCts, archivePath, page))
+            {
+                return;
+            }
+
+            if (IsLikelyPasswordProblem(ex))
+            {
+                page.StopVideo();
+                ResetArchiveState();
+                _isArchiveLoading = false;
+                SetLoadingState(false);
+
+                var requestedPassword = await ShowPasswordOverlayAsync(archivePath);
+                if (requestedPassword is null)
+                {
+                    StatusTextBlock.Text = "已取消打开压缩包";
+                    return;
+                }
+
+                await LoadArchiveWithPasswordRetryAsync(archivePath, requestedPassword);
+                return;
+            }
+
+            page.StopVideo();
             StatusTextBlock.Text = "视频播放失败";
             MessageBox.Show(this, ex.Message, "无法播放视频", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            if (!sessionAssignedToPage)
+            {
+                session?.Dispose();
+            }
+
+            videoStream?.Dispose();
+            FinishVideoPlayLoad(videoPlayCts);
         }
     }
 
@@ -786,7 +857,6 @@ public partial class MainWindow : Window
         var cts = _cacheLoadCts;
         _cacheLoadCts = null;
         cts?.Cancel();
-        cts?.Dispose();
         CancelCoverLoads();
     }
 
@@ -812,7 +882,6 @@ public partial class MainWindow : Window
         var cts = _coverLoadCts;
         _coverLoadCts = null;
         cts?.Cancel();
-        cts?.Dispose();
     }
 
     private void FinishCoverLoad(CancellationTokenSource cts)
@@ -823,6 +892,40 @@ public partial class MainWindow : Window
         }
 
         cts.Dispose();
+    }
+
+    private CancellationTokenSource BeginVideoPlayLoad()
+    {
+        CancelVideoPlayLoad();
+        _videoPlayCts = new CancellationTokenSource();
+        return _videoPlayCts;
+    }
+
+    private void CancelVideoPlayLoad()
+    {
+        var cts = _videoPlayCts;
+        _videoPlayCts = null;
+        cts?.Cancel();
+    }
+
+    private void FinishVideoPlayLoad(CancellationTokenSource cts)
+    {
+        if (ReferenceEquals(_videoPlayCts, cts))
+        {
+            _videoPlayCts = null;
+        }
+
+        cts.Dispose();
+    }
+
+    private bool IsVideoPlayRequestCurrent(CancellationTokenSource cts, string archivePath, ComicPage page)
+    {
+        return ReferenceEquals(_videoPlayCts, cts)
+            && !cts.IsCancellationRequested
+            && string.Equals(_archivePath, archivePath, StringComparison.Ordinal)
+            && page.Index >= 0
+            && page.Index < Pages.Count
+            && ReferenceEquals(Pages[page.Index], page);
     }
 
     private void InitializePagesScrollViewer()
@@ -1184,20 +1287,21 @@ public partial class MainWindow : Window
 
         var cacheLoadCts = BeginCacheLoad();
         var cancellationToken = cacheLoadCts.Token;
-        var password = _password;
-        _loadingWindowStart = windowStart;
-        _loadingWindowEnd = windowEnd;
-        var pageSnapshot = Pages.ToList();
-        PruneMediaOutsideWindow(windowStart, windowEnd);
-        var requests = CreateImageLoadRequests(pageSnapshot, windowStart, windowEnd - windowStart + 1, onlyMissing: true);
-
         try
         {
+            var password = _password;
+            _loadingWindowStart = windowStart;
+            _loadingWindowEnd = windowEnd;
+            var pageSnapshot = Pages.ToList();
+            PruneMediaOutsideWindow(windowStart, windowEnd);
+            var requests = CreateImageLoadRequests(pageSnapshot, windowStart, windowEnd - windowStart + 1, onlyMissing: true);
+            var decodePixelWidth = GetDecodePixelWidth();
+
             var loadedImages = await Task.Run(() => LoadImagesFromArchive(
                 archivePath,
                 password,
                 requests,
-                GetDecodePixelWidth(),
+                decodePixelWidth,
                 (pageIndex, entryKey, image) => Dispatcher.BeginInvoke(new Action(() =>
                 {
                     if (cancellationToken.IsCancellationRequested
