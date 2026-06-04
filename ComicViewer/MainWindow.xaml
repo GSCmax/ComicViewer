@@ -465,7 +465,7 @@
                                 <TextBlock Foreground="White"
                                            FontSize="13"
                                            FontWeight="SemiBold"
-                                           Text="{Binding VideoTimeText}" />
+                                           Text="{Binding VideoOverlayText}" />
                             </Border>
                         </StackPanel>
                     </Grid>

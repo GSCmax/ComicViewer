@@ -657,7 +657,7 @@ public partial class MainWindow : Window
         return new VideoPlaybackSession(videoStream, input, media, mediaPlayer, renderer);
     }
 
-    private async Task<MemoryStream?> TryLoadVideoCoverAsync(ComicPage page, CancellationToken cancellationToken)
+    private async Task<VideoCoverLoadResult?> TryLoadVideoCoverAsync(ComicPage page, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var archivePath = _archivePath;
@@ -675,7 +675,7 @@ public partial class MainWindow : Window
                 cancellationToken);
             if (probeReader is null)
             {
-                return null;
+                return new VideoCoverLoadResult(null, VideoCoverLoadStatus.Failed);
             }
 
             using var probeStream = new MemoryStream();
@@ -695,11 +695,15 @@ public partial class MainWindow : Window
                 var frameFound = await TryRenderVideoCoverFrameAsync(page, CreateReadOnlyMemoryStreamView(probeStream), cancellationToken);
                 if (frameFound)
                 {
-                    return reachedEnd ? CloneMemoryStream(probeStream) : null;
+                    return new VideoCoverLoadResult(
+                        reachedEnd ? CloneMemoryStream(probeStream) : null,
+                        VideoCoverLoadStatus.Success);
                 }
             }
 
-            return null;
+            return new VideoCoverLoadResult(
+                null,
+                reachedEnd ? VideoCoverLoadStatus.Failed : VideoCoverLoadStatus.Oversized);
         }
         finally
         {
@@ -1796,6 +1800,7 @@ public partial class MainWindow : Window
         }
 
         var semaphoreAcquired = false;
+        VideoCoverLoadResult? coverLoadResult = null;
         try
         {
             await _coverLoadSemaphore.WaitAsync(cancellationToken);
@@ -1805,13 +1810,13 @@ public partial class MainWindow : Window
                 return;
             }
 
-            var videoStream = await TryLoadVideoCoverAsync(page, cancellationToken);
+            coverLoadResult = await TryLoadVideoCoverAsync(page, cancellationToken);
             if (cancellationToken.IsCancellationRequested || page.IsVideoPlaying)
             {
-                videoStream?.Dispose();
                 return;
             }
 
+            page.SetCoverLoadStatus(coverLoadResult?.Status ?? VideoCoverLoadStatus.Failed);
             await Dispatcher.InvokeAsync(() =>
             {
                 if (!cancellationToken.IsCancellationRequested)
@@ -1819,10 +1824,9 @@ public partial class MainWindow : Window
                     UpdateReadingStatus(GetCurrentPageIndex());
                 }
             });
-            if (videoStream is not null)
+            if (coverLoadResult?.VideoStream is not null)
             {
-                page.TryCacheVideoData(videoStream, MaxCachedVideoBytes);
-                videoStream.Dispose();
+                page.TryCacheVideoData(coverLoadResult.VideoStream, MaxCachedVideoBytes);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -1830,10 +1834,12 @@ public partial class MainWindow : Window
         }
         catch
         {
+            page.SetCoverLoadStatus(VideoCoverLoadStatus.Failed);
             // Cover extraction is best-effort; the play button remains available.
         }
         finally
         {
+            coverLoadResult?.VideoStream?.Dispose();
             page.EndCoverLoad();
             if (semaphoreAcquired)
             {
@@ -1859,6 +1865,7 @@ public sealed class ComicPage : INotifyPropertyChanged
     private VlcMediaPlayer? _mediaPlayer;
     private ImageSource? _videoFrame;
     private ArraySegment<byte>? _cachedVideoData;
+    private VideoCoverLoadStatus _coverLoadStatus;
     private bool _isCoverLoading;
     private bool _isVideoPaused;
     private bool _isVideoPlaying;
@@ -1947,6 +1954,7 @@ public sealed class ComicPage : INotifyPropertyChanged
             {
                 _isVideoPlaying = value;
                 OnPropertyChanged();
+                OnPropertyChanged(nameof(VideoOverlayText));
             }
         }
     }
@@ -1967,6 +1975,17 @@ public sealed class ComicPage : INotifyPropertyChanged
     public string VideoTimeText => IsVideo
         ? $"{FormatVideoTime(_videoPositionMs)}/{FormatVideoTime(_videoDurationMs)}"
         : "";
+
+    public string VideoOverlayText => !IsVideo
+        ? ""
+        : !IsVideoPlaying && VideoFrame is null
+            ? _coverLoadStatus switch
+            {
+                VideoCoverLoadStatus.Oversized => "视频过大，取消封面加载",
+                VideoCoverLoadStatus.Failed => "未能成功加载封面",
+                _ => VideoTimeText
+            }
+            : VideoTimeText;
 
     public double DisplayHeight
     {
@@ -2051,6 +2070,7 @@ public sealed class ComicPage : INotifyPropertyChanged
         {
             _videoPositionMs = positionMs;
             OnPropertyChanged(nameof(VideoTimeText));
+            OnPropertyChanged(nameof(VideoOverlayText));
         }
     }
 
@@ -2065,17 +2085,21 @@ public sealed class ComicPage : INotifyPropertyChanged
         {
             _videoDurationMs = durationMs;
             OnPropertyChanged(nameof(VideoTimeText));
+            OnPropertyChanged(nameof(VideoOverlayText));
         }
     }
 
     public void SetVideoFrame(ImageSource frame)
     {
         var wasLoaded = IsLoaded;
+        SetCoverLoadStatus(VideoCoverLoadStatus.None);
         VideoFrame = frame;
         if (wasLoaded != IsLoaded)
         {
             OnPropertyChanged(nameof(IsLoaded));
         }
+
+        OnPropertyChanged(nameof(VideoOverlayText));
     }
 
     public void ClearVideoFrame()
@@ -2085,6 +2109,17 @@ public sealed class ComicPage : INotifyPropertyChanged
         if (wasLoaded != IsLoaded)
         {
             OnPropertyChanged(nameof(IsLoaded));
+        }
+
+        OnPropertyChanged(nameof(VideoOverlayText));
+    }
+
+    public void SetCoverLoadStatus(VideoCoverLoadStatus status)
+    {
+        if (_coverLoadStatus != status)
+        {
+            _coverLoadStatus = status;
+            OnPropertyChanged(nameof(VideoOverlayText));
         }
     }
 
@@ -2096,6 +2131,7 @@ public sealed class ComicPage : INotifyPropertyChanged
         }
 
         _isCoverLoading = true;
+        SetCoverLoadStatus(VideoCoverLoadStatus.None);
         return true;
     }
 
@@ -2239,6 +2275,8 @@ public sealed class ComicPage : INotifyPropertyChanged
 public sealed record ComicArchiveEntry(string Key, ComicMediaType Type);
 
 public sealed record ImageLoadRequest(int Index, string EntryKey);
+
+public sealed record VideoCoverLoadResult(MemoryStream? VideoStream, VideoCoverLoadStatus Status);
 
 public sealed class VideoPlaybackSession : IDisposable
 {
@@ -2470,6 +2508,14 @@ public enum ComicMediaType
 {
     Image,
     Video
+}
+
+public enum VideoCoverLoadStatus
+{
+    None,
+    Success,
+    Failed,
+    Oversized
 }
 
 public sealed class MinimumThumbTrack : Track
