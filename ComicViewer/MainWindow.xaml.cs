@@ -28,6 +28,7 @@ public partial class MainWindow : Window
     private const double MouseWheelScrollMultiplier = 5d;
     private const double MouseWheelPixelsPerLine = 16d;
     private const int MinimumDecodePixelWidth = 480;
+    private const int ImageDecodeParallelism = 4;
     private const long MaxCachedVideoBytes = 128L * 1024 * 1024;
     private const long CoverProbeStepBytes = 16L * 1024 * 1024;
     private const long MaxCoverProbeBytes = 128L * 1024 * 1024;
@@ -59,6 +60,7 @@ public partial class MainWindow : Window
 
     private string? _archivePath;
     private string? _password;
+    private ArchiveSession? _archiveSession;
     private int _cacheWindowStart = -1;
     private int _cacheWindowEnd = -1;
     private int? _loadingWindowStart;
@@ -100,6 +102,7 @@ public partial class MainWindow : Window
             _loadingWindowEnd = null;
             CancelCacheLoads();
             CancelVideoPlayLoad();
+            DisposeArchiveSession();
             _cacheLoadCts?.Dispose();
             _coverLoadCts?.Dispose();
             _videoPlayCts?.Dispose();
@@ -196,6 +199,7 @@ public partial class MainWindow : Window
     private async Task LoadArchiveWithPasswordRetryAsync(string archivePath, string? initialPassword = null)
     {
         string? password = initialPassword;
+        ArchiveSession? archiveSession = null;
 
         while (true)
         {
@@ -210,11 +214,16 @@ public partial class MainWindow : Window
                 _loadingWindowStart = null;
                 _loadingWindowEnd = null;
                 StopAllVideos();
-                var entries = await Task.Run(() => LoadMediaEntries(archivePath, password));
+                archiveSession?.Dispose();
+                archiveSession = await Task.Run(() => ArchiveSession.Open(archivePath, password));
+                var entries = archiveSession.MediaEntries;
                 var pages = entries
                     .Select((entry, index) => new ComicPage(index, entry.Key, entry.Type, _pageWidth))
                     .ToList();
 
+                DisposeArchiveSession();
+                _archiveSession = archiveSession;
+                archiveSession = null;
                 _archivePath = archivePath;
                 _password = password;
                 _cacheWindowStart = -1;
@@ -248,6 +257,8 @@ public partial class MainWindow : Window
             }
             catch (Exception ex) when (IsLikelyPasswordProblem(ex))
             {
+                archiveSession?.Dispose();
+                archiveSession = null;
                 ResetArchiveState();
                 _isArchiveLoading = false;
                 SetLoadingState(false);
@@ -264,6 +275,8 @@ public partial class MainWindow : Window
             }
             catch (Exception ex)
             {
+                archiveSession?.Dispose();
+                archiveSession = null;
                 ResetArchiveState();
 
                 StatusTextBlock.Text = "打开失败";
@@ -287,9 +300,17 @@ public partial class MainWindow : Window
         _cacheWindowEnd = -1;
         CancelCacheLoads();
         CancelVideoPlayLoad();
+        DisposeArchiveSession();
         _pendingCachePageIndex = -1;
         StopAllVideos();
         Pages.Clear();
+    }
+
+    private void DisposeArchiveSession()
+    {
+        var archiveSession = _archiveSession;
+        _archiveSession = null;
+        archiveSession?.Dispose();
     }
 
     private Task<string?> ShowPasswordOverlayAsync(string archivePath)
@@ -421,29 +442,148 @@ public partial class MainWindow : Window
         }
     }
 
-    private static List<ComicArchiveEntry> LoadMediaEntries(string archivePath, string? password)
+    private sealed class ArchiveSession : IDisposable
     {
-        var options = new ReaderOptions
-        {
-            Password = password
-        };
+        private readonly IArchive _archive;
+        private readonly List<IArchiveEntry> _entriesInArchiveOrder;
+        private readonly SemaphoreSlim _archiveLock = new(1, 1);
+        private bool _isDisposed;
 
-        using var archive = ArchiveFactory.OpenArchive(archivePath, options);
-        var mediaEntries = archive.Entries
-            .Where(entry => !entry.IsDirectory && IsSupportedMediaFile(entry.Key))
-            .OrderBy(entry => entry.Key, NaturalFileNameComparer.Instance)
-            .ToList();
-
-        var firstMediaEntry = mediaEntries.FirstOrDefault();
-        if (firstMediaEntry is not null)
+        private ArchiveSession(IArchive archive, List<IArchiveEntry> entriesInArchiveOrder, IReadOnlyList<ComicArchiveEntry> mediaEntries)
         {
-            using var entryStream = firstMediaEntry.OpenEntryStream();
-            _ = entryStream.ReadByte();
+            _archive = archive;
+            _entriesInArchiveOrder = entriesInArchiveOrder;
+            MediaEntries = mediaEntries;
         }
 
-        return mediaEntries
-            .Select(entry => new ComicArchiveEntry(entry.Key!, GetMediaType(entry.Key!)))
-            .ToList();
+        public IReadOnlyList<ComicArchiveEntry> MediaEntries { get; }
+
+        public static ArchiveSession Open(string archivePath, string? password)
+        {
+            var options = new ReaderOptions
+            {
+                Password = password
+            };
+
+            var archive = ArchiveFactory.OpenArchive(archivePath, options);
+            try
+            {
+                var entriesInArchiveOrder = archive.Entries
+                    .Where(entry => !entry.IsDirectory && entry.Key is not null)
+                    .ToList();
+                var mediaEntries = entriesInArchiveOrder
+                    .Where(entry => IsSupportedMediaFile(entry.Key))
+                    .OrderBy(entry => entry.Key, NaturalFileNameComparer.Instance)
+                    .Select(entry => new ComicArchiveEntry(entry.Key!, GetMediaType(entry.Key!)))
+                    .ToList();
+
+                var firstMediaEntry = mediaEntries.FirstOrDefault();
+                if (firstMediaEntry is not null)
+                {
+                    var entry = entriesInArchiveOrder.First(entry => string.Equals(entry.Key, firstMediaEntry.Key, StringComparison.Ordinal));
+                    using var entryStream = entry.OpenEntryStream();
+                    _ = entryStream.ReadByte();
+                }
+
+                return new ArchiveSession(archive, entriesInArchiveOrder, mediaEntries);
+            }
+            catch
+            {
+                archive.Dispose();
+                throw;
+            }
+        }
+
+        public List<EncodedImageLoadRequest> CopyImageEntriesToMemory(
+            IReadOnlyList<ImageLoadRequest> requests,
+            CancellationToken cancellationToken)
+        {
+            if (requests.Count == 0)
+            {
+                return [];
+            }
+
+            var requestedPagesByKey = requests.ToDictionary(request => request.EntryKey, request => request.Index, StringComparer.Ordinal);
+            if (requestedPagesByKey.Count == 0)
+            {
+                return [];
+            }
+
+            _archiveLock.Wait(cancellationToken);
+            try
+            {
+                ThrowIfDisposed();
+                var encodedImages = new List<EncodedImageLoadRequest>(requestedPagesByKey.Count);
+                foreach (var entry in _entriesInArchiveOrder)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (!requestedPagesByKey.TryGetValue(entry.Key!, out var pageIndex))
+                    {
+                        continue;
+                    }
+
+                    using var entryStream = entry.OpenEntryStream();
+                    MemoryStream? memoryStream = CreateMemoryStreamForEntry(entry);
+                    try
+                    {
+                        TryCopyToMemoryStream(entryStream, memoryStream, cancellationToken);
+                        memoryStream.Position = 0;
+                        encodedImages.Add(new EncodedImageLoadRequest(pageIndex, entry.Key!, memoryStream));
+                        memoryStream = null;
+                    }
+                    finally
+                    {
+                        memoryStream?.Dispose();
+                    }
+
+                    if (encodedImages.Count == requestedPagesByKey.Count)
+                    {
+                        break;
+                    }
+                }
+
+                return encodedImages;
+            }
+            finally
+            {
+                _archiveLock.Release();
+            }
+        }
+
+        private static MemoryStream CreateMemoryStreamForEntry(IArchiveEntry entry)
+        {
+            var entrySize = entry.Size;
+            return entrySize > 0 && entrySize <= int.MaxValue
+                ? new MemoryStream(checked((int)entrySize))
+                : new MemoryStream();
+        }
+
+        private void ThrowIfDisposed()
+        {
+            if (_isDisposed)
+            {
+                throw new ObjectDisposedException(nameof(ArchiveSession));
+            }
+        }
+
+        public void Dispose()
+        {
+            _archiveLock.Wait();
+            try
+            {
+                if (_isDisposed)
+                {
+                    return;
+                }
+
+                _isDisposed = true;
+                _archive.Dispose();
+            }
+            finally
+            {
+                _archiveLock.Release();
+            }
+        }
     }
 
     private static List<ImageLoadRequest> CreateImageLoadRequests(
@@ -467,8 +607,7 @@ public partial class MainWindow : Window
     }
 
     private static Dictionary<int, BitmapImage> LoadImagesFromArchive(
-        string archivePath,
-        string? password,
+        ArchiveSession archiveSession,
         IReadOnlyList<ImageLoadRequest> requests,
         int decodePixelWidth,
         Action<int, string, BitmapImage>? imageLoaded = null,
@@ -479,53 +618,72 @@ public partial class MainWindow : Window
             return [];
         }
 
-        var requestedPagesByKey = requests.ToDictionary(request => request.EntryKey, request => request.Index, StringComparer.Ordinal);
+        var encodedImages = archiveSession.CopyImageEntriesToMemory(requests, cancellationToken);
+        return DecodeImagesInParallel(encodedImages, decodePixelWidth, imageLoaded, cancellationToken);
+    }
 
-        if (requestedPagesByKey.Count == 0)
+    private static Dictionary<int, BitmapImage> DecodeImagesInParallel(
+        IReadOnlyList<EncodedImageLoadRequest> encodedImages,
+        int decodePixelWidth,
+        Action<int, string, BitmapImage>? imageLoaded,
+        CancellationToken cancellationToken)
+    {
+        if (encodedImages.Count == 0)
         {
             return [];
         }
 
-        var options = new ReaderOptions
+        var images = new BitmapImage?[encodedImages.Count];
+        var parallelOptions = new ParallelOptions
         {
-            Password = password
+            MaxDegreeOfParallelism = ImageDecodeParallelism,
+            CancellationToken = cancellationToken
         };
 
-        var images = new Dictionary<int, BitmapImage>();
-        using var archive = ArchiveFactory.OpenArchive(archivePath, options);
-        foreach (var entry in archive.Entries.Where(entry => !entry.IsDirectory && entry.Key is not null))
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            if (!requestedPagesByKey.TryGetValue(entry.Key!, out var pageIndex))
+            Parallel.For(0, encodedImages.Count, parallelOptions, i =>
             {
-                continue;
-            }
-
-            using var entryStream = entry.OpenEntryStream();
-            using var memoryStream = new MemoryStream();
-            TryCopyToMemoryStream(entryStream, memoryStream, cancellationToken);
-
-            memoryStream.Position = 0;
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var image = new BitmapImage();
-            image.BeginInit();
-            image.CacheOption = BitmapCacheOption.OnLoad;
-            image.DecodePixelWidth = decodePixelWidth;
-            image.StreamSource = memoryStream;
-            image.EndInit();
-            image.Freeze();
-            images[pageIndex] = image;
-            imageLoaded?.Invoke(pageIndex, entry.Key!, image);
-
-            if (images.Count == requestedPagesByKey.Count)
+                cancellationToken.ThrowIfCancellationRequested();
+                var request = encodedImages[i];
+                var image = DecodeImage(request.EncodedStream, decodePixelWidth, cancellationToken);
+                images[i] = image;
+                imageLoaded?.Invoke(request.PageIndex, request.EntryKey, image);
+            });
+        }
+        finally
+        {
+            foreach (var request in encodedImages)
             {
-                break;
+                request.EncodedStream.Dispose();
             }
         }
 
-        return images;
+        var decodedImages = new Dictionary<int, BitmapImage>(encodedImages.Count);
+        for (var i = 0; i < encodedImages.Count; i++)
+        {
+            if (images[i] is { } image)
+            {
+                decodedImages[encodedImages[i].PageIndex] = image;
+            }
+        }
+
+        return decodedImages;
+    }
+
+    private static BitmapImage DecodeImage(MemoryStream encodedStream, int decodePixelWidth, CancellationToken cancellationToken)
+    {
+        encodedStream.Position = 0;
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var image = new BitmapImage();
+        image.BeginInit();
+        image.CacheOption = BitmapCacheOption.OnLoad;
+        image.DecodePixelWidth = decodePixelWidth;
+        image.StreamSource = encodedStream;
+        image.EndInit();
+        image.Freeze();
+        return image;
     }
 
     private static void TryCopyToMemoryStream(Stream source, MemoryStream destination, CancellationToken cancellationToken = default)
@@ -678,32 +836,48 @@ public partial class MainWindow : Window
                 return new VideoCoverLoadResult(null, VideoCoverLoadStatus.Failed);
             }
 
-            using var probeStream = new MemoryStream();
+            var probeStream = new MemoryStream();
+            var probeStreamTransferred = false;
             var reachedEnd = false;
-            while (probeStream.Length < MaxCoverProbeBytes && !reachedEnd)
+            try
             {
-                var bytesToRead = Math.Min(CoverProbeStepBytes, MaxCoverProbeBytes - probeStream.Length);
-                reachedEnd = await Task.Run(
-                    () => probeReader.CopyAtMostToMemoryStream(probeStream, bytesToRead, cancellationToken),
-                    cancellationToken);
-
-                if (probeStream.Length == 0 || cancellationToken.IsCancellationRequested || page.IsVideoPlaying)
+                while (probeStream.Length < MaxCoverProbeBytes && !reachedEnd)
                 {
-                    return null;
+                    var bytesToRead = Math.Min(CoverProbeStepBytes, MaxCoverProbeBytes - probeStream.Length);
+                    reachedEnd = await Task.Run(
+                        () => probeReader.CopyAtMostToMemoryStream(probeStream, bytesToRead, cancellationToken),
+                        cancellationToken);
+
+                    if (probeStream.Length == 0 || cancellationToken.IsCancellationRequested || page.IsVideoPlaying)
+                    {
+                        return null;
+                    }
+
+                    var frameFound = await TryRenderVideoCoverFrameAsync(page, CreateReadOnlyMemoryStreamView(probeStream), cancellationToken);
+                    if (frameFound)
+                    {
+                        if (reachedEnd)
+                        {
+                            probeStream.Position = 0;
+                            probeStreamTransferred = true;
+                            return new VideoCoverLoadResult(probeStream, VideoCoverLoadStatus.Success);
+                        }
+
+                        return new VideoCoverLoadResult(null, VideoCoverLoadStatus.Success);
+                    }
                 }
 
-                var frameFound = await TryRenderVideoCoverFrameAsync(page, CreateReadOnlyMemoryStreamView(probeStream), cancellationToken);
-                if (frameFound)
+                return new VideoCoverLoadResult(
+                    null,
+                    reachedEnd ? VideoCoverLoadStatus.Failed : VideoCoverLoadStatus.Oversized);
+            }
+            finally
+            {
+                if (!probeStreamTransferred)
                 {
-                    return new VideoCoverLoadResult(
-                        reachedEnd ? CloneMemoryStream(probeStream) : null,
-                        VideoCoverLoadStatus.Success);
+                    probeStream.Dispose();
                 }
             }
-
-            return new VideoCoverLoadResult(
-                null,
-                reachedEnd ? VideoCoverLoadStatus.Failed : VideoCoverLoadStatus.Oversized);
         }
         finally
         {
@@ -1449,7 +1623,7 @@ public partial class MainWindow : Window
         {
             while (_pendingCachePageIndex >= 0)
             {
-                await Task.Delay(90);
+                await Task.Yield();
                 var currentPageIndex = _pendingCachePageIndex;
                 _pendingCachePageIndex = -1;
                 if (_isArchiveLoading || Pages.Count == 0 || _archivePath is null)
@@ -1492,7 +1666,8 @@ public partial class MainWindow : Window
     private async Task LoadCacheWindowAsync(int windowStart, int windowEnd, int currentPageIndex, bool showErrors = true)
     {
         var archivePath = _archivePath;
-        if (archivePath is null || Pages.Count == 0)
+        var archiveSession = _archiveSession;
+        if (archivePath is null || archiveSession is null || Pages.Count == 0)
         {
             return;
         }
@@ -1510,7 +1685,6 @@ public partial class MainWindow : Window
         var cancellationToken = cacheLoadCts.Token;
         try
         {
-            var password = _password;
             _loadingWindowStart = windowStart;
             _loadingWindowEnd = windowEnd;
             var pageSnapshot = Pages.ToList();
@@ -1519,13 +1693,13 @@ public partial class MainWindow : Window
             var decodePixelWidth = GetDecodePixelWidth();
 
             var loadedImages = await Task.Run(() => LoadImagesFromArchive(
-                archivePath,
-                password,
+                archiveSession,
                 requests,
                 decodePixelWidth,
                 (pageIndex, entryKey, image) => Dispatcher.BeginInvoke(new Action(() =>
                 {
                     if (cancellationToken.IsCancellationRequested
+                        || !ReferenceEquals(_archiveSession, archiveSession)
                         || !string.Equals(_archivePath, archivePath, StringComparison.Ordinal)
                         || pageIndex < windowStart
                         || pageIndex > windowEnd
@@ -2275,6 +2449,8 @@ public sealed class ComicPage : INotifyPropertyChanged
 public sealed record ComicArchiveEntry(string Key, ComicMediaType Type);
 
 public sealed record ImageLoadRequest(int Index, string EntryKey);
+
+public sealed record EncodedImageLoadRequest(int PageIndex, string EntryKey, MemoryStream EncodedStream);
 
 public sealed record VideoCoverLoadResult(MemoryStream? VideoStream, VideoCoverLoadStatus Status);
 
