@@ -29,6 +29,9 @@ public partial class MainWindow : Window
     private const double MouseWheelPixelsPerLine = 16d;
     private const int MinimumDecodePixelWidth = 480;
     private const long MaxCachedVideoBytes = 128L * 1024 * 1024;
+    private const long CoverProbeStepBytes = 16L * 1024 * 1024;
+    private const long MaxCoverProbeBytes = 128L * 1024 * 1024;
+    private static readonly TimeSpan CoverProbeFrameTimeout = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan PageWidthUpdateDelay = TimeSpan.FromMilliseconds(120);
 
     private static readonly HashSet<string> ImageExtensions = new(StringComparer.OrdinalIgnoreCase)
@@ -542,6 +545,61 @@ public partial class MainWindow : Window
         }
     }
 
+    private static bool CopyAtMostToMemoryStream(
+        Stream source,
+        MemoryStream destination,
+        long maxBytes,
+        CancellationToken cancellationToken = default)
+    {
+        var buffer = new byte[128 * 1024];
+        var remainingBytes = maxBytes;
+        while (remainingBytes > 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var bytesToRead = (int)Math.Min(buffer.Length, remainingBytes);
+            var bytesRead = source.Read(buffer, 0, bytesToRead);
+            if (bytesRead == 0)
+            {
+                return true;
+            }
+
+            destination.Write(buffer, 0, bytesRead);
+            remainingBytes -= bytesRead;
+        }
+
+        return false;
+    }
+
+    private static MemoryStream CloneMemoryStream(MemoryStream source)
+    {
+        var copy = new MemoryStream(checked((int)source.Length));
+        if (source.TryGetBuffer(out var buffer))
+        {
+            copy.Write(buffer.Array!, buffer.Offset, checked((int)source.Length));
+        }
+        else
+        {
+            var previousPosition = source.Position;
+            source.Position = 0;
+            source.CopyTo(copy);
+            source.Position = previousPosition;
+        }
+
+        copy.Position = 0;
+        return copy;
+    }
+
+    private static MemoryStream CreateReadOnlyMemoryStreamView(MemoryStream source)
+    {
+        if (source.TryGetBuffer(out var buffer))
+        {
+            return new MemoryStream(buffer.Array!, buffer.Offset, checked((int)source.Length), writable: false);
+        }
+
+        return CloneMemoryStream(source);
+    }
+
     private MemoryStream LoadVideoToMemory(ComicPage page, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -597,6 +655,88 @@ public partial class MainWindow : Window
         mediaPlayer.Media = media;
 
         return new VideoPlaybackSession(videoStream, input, media, mediaPlayer, renderer);
+    }
+
+    private async Task<MemoryStream?> TryLoadVideoCoverAsync(ComicPage page, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var archivePath = _archivePath;
+        var password = _password;
+        if (archivePath is null)
+        {
+            return null;
+        }
+
+        var options = new ReaderOptions
+        {
+            Password = password
+        };
+
+        using var archive = ArchiveFactory.OpenArchive(archivePath, options);
+        var entry = archive.Entries.FirstOrDefault(entry => !entry.IsDirectory && string.Equals(entry.Key, page.EntryKey, StringComparison.Ordinal));
+        if (entry is null)
+        {
+            return null;
+        }
+
+        using var entryStream = entry.OpenEntryStream();
+        using var probeStream = new MemoryStream();
+        var reachedEnd = false;
+        while (probeStream.Length < MaxCoverProbeBytes && !reachedEnd)
+        {
+            var bytesToRead = Math.Min(CoverProbeStepBytes, MaxCoverProbeBytes - probeStream.Length);
+            reachedEnd = await Task.Run(
+                () => CopyAtMostToMemoryStream(entryStream, probeStream, bytesToRead, cancellationToken),
+                cancellationToken);
+
+            if (probeStream.Length == 0 || cancellationToken.IsCancellationRequested || page.IsVideoPlaying)
+            {
+                return null;
+            }
+
+            var frameFound = await TryRenderVideoCoverFrameAsync(page, CreateReadOnlyMemoryStreamView(probeStream), cancellationToken);
+            if (frameFound)
+            {
+                return reachedEnd ? CloneMemoryStream(probeStream) : null;
+            }
+        }
+
+        return null;
+    }
+
+    private async Task<bool> TryRenderVideoCoverFrameAsync(ComicPage page, MemoryStream videoStream, CancellationToken cancellationToken)
+    {
+        VideoPlaybackSession? session = null;
+        try
+        {
+            session = CreateMemoryVideoPlaybackSession(page, videoStream, disableAudio: true);
+            page.SetCoverSession(session);
+
+            if (!session.MediaPlayer.Play())
+            {
+                return false;
+            }
+
+            await session.Renderer.FirstFrameDisplayed.WaitAsync(CoverProbeFrameTimeout, cancellationToken);
+            return true;
+        }
+        catch (TimeoutException)
+        {
+            return false;
+        }
+        finally
+        {
+            if (session is not null)
+            {
+                session.Stop();
+                page.DetachCoverSession(session);
+                await Task.Run(session.Dispose, CancellationToken.None);
+            }
+            else
+            {
+                videoStream.Dispose();
+            }
+        }
     }
 
     private async void PlayVideoButton_Click(object sender, RoutedEventArgs e)
@@ -1578,7 +1718,6 @@ public partial class MainWindow : Window
             return;
         }
 
-        VideoPlaybackSession? session = null;
         var semaphoreAcquired = false;
         try
         {
@@ -1589,22 +1728,13 @@ public partial class MainWindow : Window
                 return;
             }
 
-            var videoStream = await Task.Run(() => LoadVideoToMemory(page, cancellationToken), cancellationToken);
+            var videoStream = await TryLoadVideoCoverAsync(page, cancellationToken);
             if (cancellationToken.IsCancellationRequested || page.IsVideoPlaying)
             {
-                videoStream.Dispose();
+                videoStream?.Dispose();
                 return;
             }
 
-            session = CreateMemoryVideoPlaybackSession(page, videoStream, disableAudio: true);
-            page.SetCoverSession(session);
-
-            if (!session.MediaPlayer.Play())
-            {
-                return;
-            }
-
-            await session.Renderer.FirstFrameDisplayed.WaitAsync(TimeSpan.FromSeconds(4), cancellationToken);
             await Dispatcher.InvokeAsync(() =>
             {
                 if (!cancellationToken.IsCancellationRequested)
@@ -1612,8 +1742,11 @@ public partial class MainWindow : Window
                     UpdateReadingStatus(GetCurrentPageIndex());
                 }
             });
-            session.Stop();
-            page.TryCacheVideoData(videoStream, MaxCachedVideoBytes);
+            if (videoStream is not null)
+            {
+                page.TryCacheVideoData(videoStream, MaxCachedVideoBytes);
+                videoStream.Dispose();
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1624,7 +1757,6 @@ public partial class MainWindow : Window
         }
         finally
         {
-            page.ClearCoverSession(session);
             page.EndCoverLoad();
             if (semaphoreAcquired)
             {
@@ -1944,6 +2076,14 @@ public sealed class ComicPage : INotifyPropertyChanged
 
         DisposeSessionInBackground(_coverSession, stopFirst: false);
         _coverSession = null;
+    }
+
+    public void DetachCoverSession(VideoPlaybackSession session)
+    {
+        if (ReferenceEquals(_coverSession, session))
+        {
+            _coverSession = null;
+        }
     }
 
     public void StopCoverSession()
