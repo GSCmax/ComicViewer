@@ -667,41 +667,47 @@ public partial class MainWindow : Window
             return null;
         }
 
-        var options = new ReaderOptions
+        VideoCoverProbeReader? probeReader = null;
+        try
         {
-            Password = password
-        };
-
-        using var archive = ArchiveFactory.OpenArchive(archivePath, options);
-        var entry = archive.Entries.FirstOrDefault(entry => !entry.IsDirectory && string.Equals(entry.Key, page.EntryKey, StringComparison.Ordinal));
-        if (entry is null)
-        {
-            return null;
-        }
-
-        using var entryStream = entry.OpenEntryStream();
-        using var probeStream = new MemoryStream();
-        var reachedEnd = false;
-        while (probeStream.Length < MaxCoverProbeBytes && !reachedEnd)
-        {
-            var bytesToRead = Math.Min(CoverProbeStepBytes, MaxCoverProbeBytes - probeStream.Length);
-            reachedEnd = await Task.Run(
-                () => CopyAtMostToMemoryStream(entryStream, probeStream, bytesToRead, cancellationToken),
+            probeReader = await Task.Run(
+                () => VideoCoverProbeReader.Open(archivePath, password, page.EntryKey),
                 cancellationToken);
-
-            if (probeStream.Length == 0 || cancellationToken.IsCancellationRequested || page.IsVideoPlaying)
+            if (probeReader is null)
             {
                 return null;
             }
 
-            var frameFound = await TryRenderVideoCoverFrameAsync(page, CreateReadOnlyMemoryStreamView(probeStream), cancellationToken);
-            if (frameFound)
+            using var probeStream = new MemoryStream();
+            var reachedEnd = false;
+            while (probeStream.Length < MaxCoverProbeBytes && !reachedEnd)
             {
-                return reachedEnd ? CloneMemoryStream(probeStream) : null;
+                var bytesToRead = Math.Min(CoverProbeStepBytes, MaxCoverProbeBytes - probeStream.Length);
+                reachedEnd = await Task.Run(
+                    () => probeReader.CopyAtMostToMemoryStream(probeStream, bytesToRead, cancellationToken),
+                    cancellationToken);
+
+                if (probeStream.Length == 0 || cancellationToken.IsCancellationRequested || page.IsVideoPlaying)
+                {
+                    return null;
+                }
+
+                var frameFound = await TryRenderVideoCoverFrameAsync(page, CreateReadOnlyMemoryStreamView(probeStream), cancellationToken);
+                if (frameFound)
+                {
+                    return reachedEnd ? CloneMemoryStream(probeStream) : null;
+                }
+            }
+
+            return null;
+        }
+        finally
+        {
+            if (probeReader is not null)
+            {
+                await Task.Run(probeReader.Dispose, CancellationToken.None);
             }
         }
-
-        return null;
     }
 
     private async Task<bool> TryRenderVideoCoverFrameAsync(ComicPage page, MemoryStream videoStream, CancellationToken cancellationToken)
@@ -728,14 +734,85 @@ public partial class MainWindow : Window
         {
             if (session is not null)
             {
-                session.Stop();
                 page.DetachCoverSession(session);
-                await Task.Run(session.Dispose, CancellationToken.None);
+                await Task.Run(() =>
+                {
+                    try
+                    {
+                        session.Stop();
+                        session.Dispose();
+                    }
+                    catch
+                    {
+                        // Cover extraction is best-effort; native cleanup should not break loading.
+                    }
+                }, CancellationToken.None);
             }
             else
             {
                 videoStream.Dispose();
             }
+        }
+    }
+
+    private sealed class VideoCoverProbeReader : IDisposable
+    {
+        private readonly IArchive _archive;
+        private readonly Stream _entryStream;
+        private bool _isDisposed;
+
+        private VideoCoverProbeReader(IArchive archive, Stream entryStream)
+        {
+            _archive = archive;
+            _entryStream = entryStream;
+        }
+
+        public static VideoCoverProbeReader? Open(string archivePath, string? password, string entryKey)
+        {
+            var options = new ReaderOptions
+            {
+                Password = password
+            };
+
+            var archive = ArchiveFactory.OpenArchive(archivePath, options);
+            try
+            {
+                var entry = archive.Entries.FirstOrDefault(entry => !entry.IsDirectory && string.Equals(entry.Key, entryKey, StringComparison.Ordinal));
+                if (entry is null)
+                {
+                    archive.Dispose();
+                    return null;
+                }
+
+                return new VideoCoverProbeReader(archive, entry.OpenEntryStream());
+            }
+            catch
+            {
+                archive.Dispose();
+                throw;
+            }
+        }
+
+        public bool CopyAtMostToMemoryStream(MemoryStream destination, long maxBytes, CancellationToken cancellationToken)
+        {
+            if (_isDisposed)
+            {
+                throw new ObjectDisposedException(nameof(VideoCoverProbeReader));
+            }
+
+            return MainWindow.CopyAtMostToMemoryStream(_entryStream, destination, maxBytes, cancellationToken);
+        }
+
+        public void Dispose()
+        {
+            if (_isDisposed)
+            {
+                return;
+            }
+
+            _isDisposed = true;
+            _entryStream.Dispose();
+            _archive.Dispose();
         }
     }
 
