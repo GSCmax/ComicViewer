@@ -4,6 +4,7 @@ using SharpCompress.Archives;
 using SharpCompress.Readers;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.CompilerServices;
@@ -29,6 +30,7 @@ public partial class MainWindow : Window
     private const double MouseWheelPixelsPerLine = 16d;
     private const int MinimumDecodePixelWidth = 480;
     private const int ImageDecodeParallelism = 4;
+    private const int DecodedImageCacheCapacity = 32;
     private const long MaxCachedVideoBytes = 128L * 1024 * 1024;
     private const long CoverProbeStepBytes = 16L * 1024 * 1024;
     private const long MaxCoverProbeBytes = 128L * 1024 * 1024;
@@ -75,6 +77,10 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _coverLoadCts;
     private CancellationTokenSource? _videoPlayCts;
     private double _pendingPageWidth;
+    private int _decodedImageCacheGeneration;
+    private readonly object _decodedImageCacheLock = new();
+    private readonly Dictionary<DecodedImageCacheKey, LinkedListNode<DecodedImageCacheEntry>> _decodedImageCacheByKey = new();
+    private readonly LinkedList<DecodedImageCacheEntry> _decodedImageCacheLru = new();
     private readonly LibVLC _libVlc;
     private readonly SemaphoreSlim _coverLoadSemaphore = new(1, 1);
     private readonly DispatcherTimer _pageWidthUpdateTimer = new()
@@ -94,6 +100,9 @@ public partial class MainWindow : Window
         DataContext = this;
         _pageWidthUpdateTimer.Tick += PageWidthUpdateTimer_Tick;
         LoadPasswordHistory();
+#if DEBUG
+        DebugTelemetry.Log("AppStart", $"logFile={DebugTelemetry.LogFilePath}");
+#endif
         Loaded += MainWindow_Loaded;
         Closed += (_, _) =>
         {
@@ -308,9 +317,127 @@ public partial class MainWindow : Window
 
     private void DisposeArchiveSession()
     {
+        ClearDecodedImageCache();
         var archiveSession = _archiveSession;
         _archiveSession = null;
         archiveSession?.Dispose();
+    }
+
+    private int GetDecodedImageCacheGeneration()
+    {
+        lock (_decodedImageCacheLock)
+        {
+            return _decodedImageCacheGeneration;
+        }
+    }
+
+    private void ClearDecodedImageCache()
+    {
+        int clearedCount;
+        int generation;
+
+        lock (_decodedImageCacheLock)
+        {
+            clearedCount = _decodedImageCacheByKey.Count;
+            _decodedImageCacheByKey.Clear();
+            _decodedImageCacheLru.Clear();
+            _decodedImageCacheGeneration++;
+            generation = _decodedImageCacheGeneration;
+        }
+
+#if DEBUG
+        DebugTelemetry.Log(
+            "ImageCacheClear",
+            $"count={clearedCount}",
+            $"generation={generation}");
+#endif
+    }
+
+    private bool TryGetDecodedImageFromCache(string entryKey, int decodePixelWidth, int cacheGeneration, out BitmapImage image)
+    {
+        var cacheKey = new DecodedImageCacheKey(entryKey, decodePixelWidth);
+
+        lock (_decodedImageCacheLock)
+        {
+            if (cacheGeneration != _decodedImageCacheGeneration
+                || !_decodedImageCacheByKey.TryGetValue(cacheKey, out var node))
+            {
+                image = null!;
+                return false;
+            }
+
+            _decodedImageCacheLru.Remove(node);
+            _decodedImageCacheLru.AddFirst(node);
+            image = node.Value.Image;
+            return true;
+        }
+    }
+
+    private void AddDecodedImageToCache(string entryKey, int decodePixelWidth, BitmapImage image, int cacheGeneration)
+    {
+        var cacheKey = new DecodedImageCacheKey(entryKey, decodePixelWidth);
+#if DEBUG
+        List<DecodedImageCacheKey>? evictedKeys = null;
+        int cacheCount;
+#endif
+
+        lock (_decodedImageCacheLock)
+        {
+            if (cacheGeneration != _decodedImageCacheGeneration)
+            {
+                return;
+            }
+
+            if (_decodedImageCacheByKey.TryGetValue(cacheKey, out var existingNode))
+            {
+                existingNode.Value = new DecodedImageCacheEntry(cacheKey, image);
+                _decodedImageCacheLru.Remove(existingNode);
+                _decodedImageCacheLru.AddFirst(existingNode);
+            }
+            else
+            {
+                var node = new LinkedListNode<DecodedImageCacheEntry>(new DecodedImageCacheEntry(cacheKey, image));
+                _decodedImageCacheLru.AddFirst(node);
+                _decodedImageCacheByKey.Add(cacheKey, node);
+            }
+
+            while (_decodedImageCacheByKey.Count > DecodedImageCacheCapacity && _decodedImageCacheLru.Last is { } tail)
+            {
+                _decodedImageCacheLru.RemoveLast();
+                _decodedImageCacheByKey.Remove(tail.Value.Key);
+#if DEBUG
+                (evictedKeys ??= []).Add(tail.Value.Key);
+#endif
+            }
+
+#if DEBUG
+            cacheCount = _decodedImageCacheByKey.Count;
+#endif
+        }
+
+#if DEBUG
+        DebugTelemetry.Log(
+            "ImageCacheStore",
+            $"entry={entryKey}",
+            $"decodePixelWidth={decodePixelWidth}",
+            $"pixelWidth={image.PixelWidth}",
+            $"pixelHeight={image.PixelHeight}",
+            $"cacheCount={cacheCount}",
+            $"generation={cacheGeneration}");
+
+        if (evictedKeys is not null)
+        {
+            foreach (var evictedKey in evictedKeys)
+            {
+                DebugTelemetry.Log(
+                    "ImageCacheEvict",
+                    $"entry={evictedKey.EntryKey}",
+                    $"decodePixelWidth={evictedKey.DecodePixelWidth}",
+                    $"cacheCount={cacheCount}",
+                    $"generation={cacheGeneration}");
+            }
+        }
+#endif
     }
 
     private Task<string?> ShowPasswordOverlayAsync(string archivePath)
@@ -411,6 +538,89 @@ public partial class MainWindow : Window
         }
     }
 
+#if DEBUG
+    private static class DebugTelemetry
+    {
+        private static readonly object Sync = new();
+        private static readonly string DirectoryPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "ComicViewer");
+
+        public static string LogFilePath => Path.Combine(DirectoryPath, "debug-telemetry.log");
+
+        static DebugTelemetry()
+        {
+            try
+            {
+                Directory.CreateDirectory(DirectoryPath);
+                File.WriteAllText(
+                    LogFilePath,
+                    $"# ComicViewer debug telemetry started {DateTimeOffset.Now:O}{Environment.NewLine}");
+            }
+            catch
+            {
+                // Debug telemetry must never affect the viewer.
+            }
+        }
+
+        public static long GetTimestamp()
+        {
+            return Stopwatch.GetTimestamp();
+        }
+
+        public static double GetElapsedMilliseconds(long startTimestamp)
+        {
+            return Stopwatch.GetElapsedTime(startTimestamp).TotalMilliseconds;
+        }
+
+        public static void Log(string eventName, params string[] fields)
+        {
+            try
+            {
+                var line = string.Join(
+                    "\t",
+                    new[]
+                    {
+                        DateTimeOffset.Now.ToString("O", CultureInfo.InvariantCulture),
+                        $"tid={Environment.CurrentManagedThreadId}",
+                        eventName
+                    }.Concat(fields.Select(SanitizeField)));
+
+                lock (Sync)
+                {
+                    File.AppendAllText(LogFilePath, line + Environment.NewLine);
+                }
+            }
+            catch
+            {
+                // Debug telemetry must never affect the viewer.
+            }
+        }
+
+        public static void LogDuration(string eventName, long startTimestamp, params string[] fields)
+        {
+            Log(
+                eventName,
+                fields.Concat(new[]
+                {
+                    $"elapsedMs={GetElapsedMilliseconds(startTimestamp):F3}"
+                }).ToArray());
+        }
+
+        private static string SanitizeField(string field)
+        {
+            return field
+                .Replace('\t', ' ')
+                .Replace('\r', ' ')
+                .Replace('\n', ' ');
+        }
+    }
+#endif
+
+    private sealed record DecodedImageCacheKey(string EntryKey, int DecodePixelWidth);
+
+    private sealed record DecodedImageCacheEntry(DecodedImageCacheKey Key, BitmapImage Image);
+
     private void PasswordOpenButton_Click(object sender, RoutedEventArgs e)
     {
         CompletePasswordPrompt(ArchivePasswordBox.Password);
@@ -460,6 +670,9 @@ public partial class MainWindow : Window
 
         public static ArchiveSession Open(string archivePath, string? password)
         {
+#if DEBUG
+            var openStart = DebugTelemetry.GetTimestamp();
+#endif
             var options = new ReaderOptions
             {
                 Password = password
@@ -485,6 +698,14 @@ public partial class MainWindow : Window
                     _ = entryStream.ReadByte();
                 }
 
+#if DEBUG
+                DebugTelemetry.LogDuration(
+                    "ArchiveSessionOpen",
+                    openStart,
+                    $"archive={Path.GetFileName(archivePath)}",
+                    $"entries={entriesInArchiveOrder.Count}",
+                    $"mediaEntries={mediaEntries.Count}");
+#endif
                 return new ArchiveSession(archive, entriesInArchiveOrder, mediaEntries);
             }
             catch
@@ -509,7 +730,17 @@ public partial class MainWindow : Window
                 return [];
             }
 
+#if DEBUG
+            var lockWaitStart = DebugTelemetry.GetTimestamp();
+#endif
             _archiveLock.Wait(cancellationToken);
+#if DEBUG
+            DebugTelemetry.LogDuration(
+                "ArchiveLockWait",
+                lockWaitStart,
+                $"requests={requests.Count}");
+            var copyBatchStart = DebugTelemetry.GetTimestamp();
+#endif
             try
             {
                 ThrowIfDisposed();
@@ -524,10 +755,21 @@ public partial class MainWindow : Window
 
                     using var entryStream = entry.OpenEntryStream();
                     MemoryStream? memoryStream = CreateMemoryStreamForEntry(entry);
+#if DEBUG
+                    var copyStart = DebugTelemetry.GetTimestamp();
+#endif
                     try
                     {
                         TryCopyToMemoryStream(entryStream, memoryStream, cancellationToken);
                         memoryStream.Position = 0;
+#if DEBUG
+                        DebugTelemetry.LogDuration(
+                            "ImageEntryCopy",
+                            copyStart,
+                            $"page={pageIndex + 1}",
+                            $"bytes={memoryStream.Length}",
+                            $"entry={entry.Key}");
+#endif
                         encodedImages.Add(new EncodedImageLoadRequest(pageIndex, entry.Key!, memoryStream));
                         memoryStream = null;
                     }
@@ -542,6 +784,13 @@ public partial class MainWindow : Window
                     }
                 }
 
+#if DEBUG
+                DebugTelemetry.LogDuration(
+                    "ImageCopyBatch",
+                    copyBatchStart,
+                    $"requested={requestedPagesByKey.Count}",
+                    $"copied={encodedImages.Count}");
+#endif
                 return encodedImages;
             }
             finally
@@ -606,10 +855,11 @@ public partial class MainWindow : Window
             .ToList();
     }
 
-    private static Dictionary<int, BitmapImage> LoadImagesFromArchive(
+    private Dictionary<int, BitmapImage> LoadImagesFromArchive(
         ArchiveSession archiveSession,
         IReadOnlyList<ImageLoadRequest> requests,
         int decodePixelWidth,
+        int imageCacheGeneration,
         Action<int, string, BitmapImage>? imageLoaded = null,
         CancellationToken cancellationToken = default)
     {
@@ -618,15 +868,66 @@ public partial class MainWindow : Window
             return [];
         }
 
-        var encodedImages = archiveSession.CopyImageEntriesToMemory(requests, cancellationToken);
-        return DecodeImagesInParallel(encodedImages, decodePixelWidth, imageLoaded, cancellationToken);
+        var loadedImages = new Dictionary<int, BitmapImage>(requests.Count);
+        var missingRequests = new List<ImageLoadRequest>(requests.Count);
+
+        foreach (var request in requests)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (TryGetDecodedImageFromCache(request.EntryKey, decodePixelWidth, imageCacheGeneration, out var cachedImage))
+            {
+                loadedImages[request.Index] = cachedImage;
+                imageLoaded?.Invoke(request.Index, request.EntryKey, cachedImage);
+#if DEBUG
+                DebugTelemetry.Log(
+                    "ImageCacheHit",
+                    $"page={request.Index + 1}",
+                    $"entry={request.EntryKey}",
+                    $"decodePixelWidth={decodePixelWidth}",
+                    $"generation={imageCacheGeneration}");
+#endif
+            }
+            else
+            {
+                missingRequests.Add(request);
+            }
+        }
+
+#if DEBUG
+        DebugTelemetry.Log(
+            "ImageCacheLookupBatch",
+            $"requests={requests.Count}",
+            $"hits={loadedImages.Count}",
+            $"misses={missingRequests.Count}",
+            $"generation={imageCacheGeneration}");
+#endif
+
+        if (missingRequests.Count == 0)
+        {
+            return loadedImages;
+        }
+
+        var encodedImages = archiveSession.CopyImageEntriesToMemory(missingRequests, cancellationToken);
+        var decodedImages = DecodeImagesInParallel(
+            encodedImages,
+            decodePixelWidth,
+            imageCacheGeneration,
+            imageLoaded);
+
+        foreach (var (pageIndex, image) in decodedImages)
+        {
+            loadedImages[pageIndex] = image;
+        }
+
+        return loadedImages;
     }
 
-    private static Dictionary<int, BitmapImage> DecodeImagesInParallel(
+    private Dictionary<int, BitmapImage> DecodeImagesInParallel(
         IReadOnlyList<EncodedImageLoadRequest> encodedImages,
         int decodePixelWidth,
-        Action<int, string, BitmapImage>? imageLoaded,
-        CancellationToken cancellationToken)
+        int imageCacheGeneration,
+        Action<int, string, BitmapImage>? imageLoaded)
     {
         if (encodedImages.Count == 0)
         {
@@ -636,20 +937,40 @@ public partial class MainWindow : Window
         var images = new BitmapImage?[encodedImages.Count];
         var parallelOptions = new ParallelOptions
         {
-            MaxDegreeOfParallelism = ImageDecodeParallelism,
-            CancellationToken = cancellationToken
+            MaxDegreeOfParallelism = ImageDecodeParallelism
         };
 
+#if DEBUG
+        var decodeBatchStart = DebugTelemetry.GetTimestamp();
+#endif
         try
         {
             Parallel.For(0, encodedImages.Count, parallelOptions, i =>
             {
-                cancellationToken.ThrowIfCancellationRequested();
                 var request = encodedImages[i];
-                var image = DecodeImage(request.EncodedStream, decodePixelWidth, cancellationToken);
+#if DEBUG
+                var decodeStart = DebugTelemetry.GetTimestamp();
+#endif
+                var image = DecodeImage(request.EncodedStream, decodePixelWidth);
+#if DEBUG
+                DebugTelemetry.LogDuration(
+                    "ImageDecode",
+                    decodeStart,
+                    $"page={request.PageIndex + 1}",
+                    $"bytes={request.EncodedStream.Length}",
+                    $"entry={request.EntryKey}");
+#endif
                 images[i] = image;
+                AddDecodedImageToCache(request.EntryKey, decodePixelWidth, image, imageCacheGeneration);
                 imageLoaded?.Invoke(request.PageIndex, request.EntryKey, image);
             });
+#if DEBUG
+            DebugTelemetry.LogDuration(
+                "ImageDecodeBatch",
+                decodeBatchStart,
+                $"count={encodedImages.Count}",
+                $"parallelism={ImageDecodeParallelism}");
+#endif
         }
         finally
         {
@@ -671,10 +992,9 @@ public partial class MainWindow : Window
         return decodedImages;
     }
 
-    private static BitmapImage DecodeImage(MemoryStream encodedStream, int decodePixelWidth, CancellationToken cancellationToken)
+    private static BitmapImage DecodeImage(MemoryStream encodedStream, int decodePixelWidth)
     {
         encodedStream.Position = 0;
-        cancellationToken.ThrowIfCancellationRequested();
 
         var image = new BitmapImage();
         image.BeginInit();
@@ -1607,6 +1927,12 @@ public partial class MainWindow : Window
         }
 
         _pendingCachePageIndex = currentPageIndex;
+#if DEBUG
+        DebugTelemetry.Log(
+            "CacheWindowQueued",
+            $"current={currentPageIndex + 1}",
+            $"window={window.Start + 1}-{window.End + 1}");
+#endif
         CancelCacheLoads();
         if (_isCacheLoadWorkerRunning)
         {
@@ -1691,11 +2017,22 @@ public partial class MainWindow : Window
             PruneMediaOutsideWindow(windowStart, windowEnd);
             var requests = CreateImageLoadRequests(pageSnapshot, windowStart, windowEnd - windowStart + 1, onlyMissing: true);
             var decodePixelWidth = GetDecodePixelWidth();
+            var imageCacheGeneration = GetDecodedImageCacheGeneration();
 
+#if DEBUG
+            var windowLoadStart = DebugTelemetry.GetTimestamp();
+            DebugTelemetry.Log(
+                "CacheWindowLoadStart",
+                $"window={windowStart + 1}-{windowEnd + 1}",
+                $"current={currentPageIndex + 1}",
+                $"requests={requests.Count}",
+                $"decodePixelWidth={decodePixelWidth}");
+#endif
             var loadedImages = await Task.Run(() => LoadImagesFromArchive(
                 archiveSession,
                 requests,
                 decodePixelWidth,
+                imageCacheGeneration,
                 (pageIndex, entryKey, image) => Dispatcher.BeginInvoke(new Action(() =>
                 {
                     if (cancellationToken.IsCancellationRequested
@@ -1710,11 +2047,32 @@ public partial class MainWindow : Window
                         return;
                     }
 
+#if DEBUG
+                    var uiApplyStart = DebugTelemetry.GetTimestamp();
+#endif
                     Pages[pageIndex].SetImage(image, _pageWidth);
                     UpdateReadingStatus(GetCurrentPageIndex());
+#if DEBUG
+                    DebugTelemetry.LogDuration(
+                        "ImageUiApply",
+                        uiApplyStart,
+                        $"page={pageIndex + 1}",
+                        $"entry={entryKey}",
+                        $"pixelWidth={image.PixelWidth}",
+                        $"pixelHeight={image.PixelHeight}");
+#endif
                 })),
                 cancellationToken), cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
+#if DEBUG
+            DebugTelemetry.LogDuration(
+                "CacheWindowImagesLoaded",
+                windowLoadStart,
+                $"window={windowStart + 1}-{windowEnd + 1}",
+                $"current={currentPageIndex + 1}",
+                $"requests={requests.Count}",
+                $"loaded={loadedImages.Count}");
+#endif
 
             ApplyLoadedImages(loadedImages, windowStart, windowEnd);
             _cacheWindowStart = windowStart;
