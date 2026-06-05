@@ -27,12 +27,9 @@ public partial class MainWindow : Window
     private const int MediaLoadParallelism = 2;
     private const long MaxMediaCacheBytes = 512L * 1024 * 1024;
     private const long MaxInMemoryVideoPlaybackBytes = MaxMediaCacheBytes;
-    private const int BackwardEncodedCachePages = 20;
-    private const int ForwardEncodedCachePages = 80;
-    private const int DecodedPagePadding = 2;
     private const double MouseWheelScrollMultiplier = 5d;
     private const double MouseWheelPixelsPerLine = 16d;
-    private static readonly TimeSpan CoverFrameTimeout = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan CoverFrameTimeout = TimeSpan.FromSeconds(2);
 
     private static readonly HashSet<string> ImageExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -71,10 +68,8 @@ public partial class MainWindow : Window
     private TaskCompletionSource<string?>? _passwordPrompt;
     private ScrollViewer? _pagesScrollViewer;
     private string? _archivePath;
-    private string? _password;
     private double _pageWidth = 800;
     private int _cacheGeneration;
-    private int _decodePixelWidth;
     private int _currentPageIndex;
     private long _cacheBytes;
     private long _reservedCacheBytes;
@@ -157,7 +152,7 @@ public partial class MainWindow : Window
     private void MainWindow_StateChanged(object? sender, EventArgs e)
     {
         MaximizeRestoreWindowButton.Content = WindowState == WindowState.Maximized ? "\uE923" : "\uE922";
-        Dispatcher.BeginInvoke(UpdatePageWidth);
+        Dispatcher.BeginInvoke((Action)(() => UpdatePageWidth()));
     }
 
     private void MainWindow_PreviewKeyDown(object sender, KeyEventArgs e)
@@ -203,7 +198,6 @@ public partial class MainWindow : Window
 
                 _archiveSession = session;
                 _archivePath = archivePath;
-                _password = password;
 
                 Pages.Clear();
                 foreach (var page in pages)
@@ -222,7 +216,7 @@ public partial class MainWindow : Window
                 UpdatePageWidth();
                 UpdateReadingStatus(0);
                 StartMediaLoading(0);
-                RefreshImageResidency();
+                RefreshDecodedImages();
                 return;
             }
             catch (Exception ex) when (IsLikelyPasswordProblem(ex))
@@ -256,7 +250,6 @@ public partial class MainWindow : Window
     private void ResetReader()
     {
         _archivePath = null;
-        _password = null;
         StopMediaLoader();
         CancelVideoPlayLoad();
         StopAllVideos();
@@ -308,7 +301,6 @@ public partial class MainWindow : Window
         }
 
         _currentPageIndex = Math.Clamp(currentPageIndex, 0, Pages.Count - 1);
-        EnsureDecodeWidth(GetDecodePixelWidth());
 
         lock (_cacheLock)
         {
@@ -401,6 +393,16 @@ public partial class MainWindow : Window
                 return;
             }
 
+            await Dispatcher.InvokeAsync(
+                () =>
+                {
+                    if (IsFreshRequest(request, generation))
+                    {
+                        request.Page.SetCoverLoadStatus(VideoCoverLoadStatus.Loading);
+                    }
+                },
+                System.Windows.Threading.DispatcherPriority.Background);
+
             using var encodedMedia = session.CopyEntryToMemory(request.EntryKey, cancellationToken);
             var videoData = TakeMemorySegment(encodedMedia);
             var coverFrame = await TryRenderVideoCoverFrameAsync(
@@ -448,11 +450,6 @@ public partial class MainWindow : Window
             foreach (var index in EnumeratePagesFrom(_currentPageIndex))
             {
                 var page = Pages[index];
-                if (!IsInEncodedCacheRange(index))
-                {
-                    continue;
-                }
-
                 if (_mediaCache.TryGetValue(page.EntryKey, out var cachedMedia))
                 {
                     ApplyCachedMedia(page, cachedMedia);
@@ -480,7 +477,7 @@ public partial class MainWindow : Window
 
                 _loadsInFlight.Add(page.EntryKey);
                 _reservedCacheBytes += reservedBytes;
-                return new MediaLoadRequest(index, page, page.EntryKey, page.MediaType, _decodePixelWidth, reservedBytes);
+                return new MediaLoadRequest(index, page, page.EntryKey, page.MediaType, reservedBytes);
             }
         }
 
@@ -568,7 +565,7 @@ public partial class MainWindow : Window
 
     private void EvictMediaOverBudget()
     {
-        var protectedIndexes = GetEncodedCacheIndexes();
+        var protectedIndexes = GetProtectedCacheIndexes();
         foreach (var page in Pages.Where(page => page.IsVideoPlaying))
         {
             protectedIndexes.Add(page.Index);
@@ -658,11 +655,6 @@ public partial class MainWindow : Window
         }
     }
 
-    private void EnsureDecodeWidth(int decodePixelWidth)
-    {
-        _decodePixelWidth = decodePixelWidth;
-    }
-
     private void ClearDecodedImagesForWiderDecode(int previousDecodePixelWidth, int currentDecodePixelWidth)
     {
         if (currentDecodePixelWidth <= previousDecodePixelWidth)
@@ -730,25 +722,6 @@ public partial class MainWindow : Window
         return page.EntrySize > 0 ? page.EntrySize : 2L * 1024 * 1024;
     }
 
-    private bool IsInEncodedCacheRange(int pageIndex)
-    {
-        return pageIndex >= Math.Max(0, _currentPageIndex - BackwardEncodedCachePages)
-            && pageIndex <= Math.Min(Pages.Count - 1, _currentPageIndex + ForwardEncodedCachePages);
-    }
-
-    private HashSet<int> GetEncodedCacheIndexes()
-    {
-        var indexes = new HashSet<int>();
-        var start = Math.Max(0, _currentPageIndex - BackwardEncodedCachePages);
-        var end = Math.Min(Pages.Count - 1, _currentPageIndex + ForwardEncodedCachePages);
-        for (var i = start; i <= end; i++)
-        {
-            indexes.Add(i);
-        }
-
-        return indexes;
-    }
-
     private HashSet<int> GetDecodedImageIndexes()
     {
         var indexes = GetRealizedPageIndexes();
@@ -757,49 +730,24 @@ public partial class MainWindow : Window
             indexes.Add(_currentPageIndex);
         }
 
-        foreach (var index in indexes.ToList())
+        return indexes;
+    }
+
+    private HashSet<int> GetProtectedCacheIndexes()
+    {
+        var indexes = GetDecodedImageIndexes();
+        if (_currentPageIndex >= 0 && _currentPageIndex < Pages.Count)
         {
-            var start = Math.Max(0, index - DecodedPagePadding);
-            var end = Math.Min(Pages.Count - 1, index + DecodedPagePadding);
-            for (var i = start; i <= end; i++)
-            {
-                indexes.Add(i);
-            }
+            indexes.Add(_currentPageIndex);
         }
 
         return indexes;
     }
 
-    private void RefreshImageResidency()
+    private void RefreshDecodedImages()
     {
-        EvictEncodedImagesOutsideRange();
         ReleaseDecodedImagesOutsideRange();
         DecodeVisibleImages();
-    }
-
-    private void EvictEncodedImagesOutsideRange()
-    {
-        var evictedEntries = new List<CachedMedia>();
-        lock (_cacheLock)
-        {
-            foreach (var entry in _mediaCache.Values.Where(entry => entry.Type == ComicMediaType.Image && !IsInEncodedCacheRange(entry.PageIndex)).ToList())
-            {
-                _mediaCache.Remove(entry.EntryKey);
-                _cacheBytes -= entry.EstimatedBytes;
-                evictedEntries.Add(entry);
-            }
-        }
-
-        foreach (var entry in evictedEntries)
-        {
-            ClearPageMedia(entry);
-        }
-
-        MaybeTrimReleasedCacheMemory(evictedEntries.Sum(entry => entry.EstimatedBytes));
-        if (evictedEntries.Count > 0)
-        {
-            UpdateReadingStatus(GetCurrentPageIndex());
-        }
     }
 
     private void ReleaseDecodedImagesOutsideRange()
@@ -832,7 +780,7 @@ public partial class MainWindow : Window
                 {
                     using var stream = CreateReadOnlyMemoryStream(encodedImageData);
                     var image = DecodeImage(stream, decodePixelWidth);
-                    Dispatcher.BeginInvoke(() =>
+                    Dispatcher.BeginInvoke((Action)(() =>
                     {
                         lock (_cacheLock)
                         {
@@ -850,17 +798,17 @@ public partial class MainWindow : Window
                         {
                             DecodeVisibleImages();
                         }
-                    }, System.Windows.Threading.DispatcherPriority.Background);
+                    }), System.Windows.Threading.DispatcherPriority.Background);
                 }
                 catch
                 {
-                    Dispatcher.BeginInvoke(() =>
+                    Dispatcher.BeginInvoke((Action)(() =>
                     {
                         lock (_cacheLock)
                         {
                             _decodesInFlight.Remove(page.EntryKey);
                         }
-                    }, System.Windows.Threading.DispatcherPriority.Background);
+                    }), System.Windows.Threading.DispatcherPriority.Background);
                 }
             });
         }
@@ -881,13 +829,6 @@ public partial class MainWindow : Window
         image.EndInit();
         image.Freeze();
         return image;
-    }
-
-    private static long EstimateDecodedImageBytes(BitmapSource image)
-    {
-        var bitsPerPixel = image.Format.BitsPerPixel > 0 ? image.Format.BitsPerPixel : 32;
-        var stride = ((long)image.PixelWidth * bitsPerPixel + 7) / 8;
-        return Math.Max(stride * image.PixelHeight, 1);
     }
 
     private async void PlayVideoButton_Click(object sender, RoutedEventArgs e)
@@ -1122,49 +1063,49 @@ public partial class MainWindow : Window
 
     private void AttachPlaybackEvents(ComicPage page, VideoPlaybackSession session)
     {
-        session.MediaPlayer.Playing += (_, _) => Dispatcher.BeginInvoke(() =>
+        session.MediaPlayer.Playing += (_, _) => Dispatcher.BeginInvoke((Action)(() =>
         {
             if (page.PlaybackSession == session)
             {
                 page.IsVideoPaused = false;
                 StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - 正在播放";
             }
-        });
+        }));
 
-        session.MediaPlayer.Paused += (_, _) => Dispatcher.BeginInvoke(() =>
+        session.MediaPlayer.Paused += (_, _) => Dispatcher.BeginInvoke((Action)(() =>
         {
             if (page.PlaybackSession == session)
             {
                 page.IsVideoPaused = true;
                 StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - 已暂停";
             }
-        });
+        }));
 
-        session.MediaPlayer.LengthChanged += (_, args) => Dispatcher.BeginInvoke(() =>
+        session.MediaPlayer.LengthChanged += (_, args) => Dispatcher.BeginInvoke((Action)(() =>
         {
             if (page.PlaybackSession == session)
             {
                 page.SetVideoDuration(args.Length);
             }
-        });
+        }));
 
-        session.MediaPlayer.TimeChanged += (_, args) => Dispatcher.BeginInvoke(() =>
+        session.MediaPlayer.TimeChanged += (_, args) => Dispatcher.BeginInvoke((Action)(() =>
         {
             if (page.PlaybackSession == session)
             {
                 page.SetVideoPosition(args.Time);
             }
-        });
+        }));
 
-        session.MediaPlayer.EndReached += (_, _) => Dispatcher.BeginInvoke(() =>
+        session.MediaPlayer.EndReached += (_, _) => Dispatcher.BeginInvoke((Action)(() =>
         {
             if (page.PlaybackSession == session)
             {
                 page.StopVideo();
             }
-        }, System.Windows.Threading.DispatcherPriority.Background);
+        }), System.Windows.Threading.DispatcherPriority.Background);
 
-        session.MediaPlayer.EncounteredError += (_, _) => Dispatcher.BeginInvoke(() =>
+        session.MediaPlayer.EncounteredError += (_, _) => Dispatcher.BeginInvoke((Action)(() =>
         {
             if (page.PlaybackSession != session)
             {
@@ -1174,7 +1115,7 @@ public partial class MainWindow : Window
             page.StopVideo();
             StatusTextBlock.Text = "视频播放失败";
             MessageBox.Show(this, "播放器无法播放这个视频。", "视频播放失败", MessageBoxButton.OK, MessageBoxImage.Error);
-        });
+        }));
     }
 
     private CancellationTokenSource BeginVideoPlayLoad()
@@ -1247,7 +1188,7 @@ public partial class MainWindow : Window
         _currentPageIndex = currentPageIndex;
         UpdateReadingStatus(currentPageIndex);
         StartMediaLoading(currentPageIndex);
-        RefreshImageResidency();
+        RefreshDecodedImages();
     }
 
     private void ImageScrollViewer_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
@@ -1284,7 +1225,7 @@ public partial class MainWindow : Window
         {
             ClearDecodedImagesForWiderDecode(previousDecodePixelWidth, GetDecodePixelWidth());
             StartMediaLoading(GetCurrentPageIndex());
-            RefreshImageResidency();
+            RefreshDecodedImages();
         }
     }
 
@@ -1357,14 +1298,14 @@ public partial class MainWindow : Window
         }
 
         PagesListBox.ScrollIntoView(Pages[pageIndex]);
-        Dispatcher.BeginInvoke(() =>
+        Dispatcher.BeginInvoke((Action)(() =>
         {
             AlignRealizedPageToTop(pageIndex);
             _currentPageIndex = pageIndex;
             UpdateReadingStatus(pageIndex);
             StartMediaLoading(pageIndex);
-            RefreshImageResidency();
-        }, System.Windows.Threading.DispatcherPriority.Loaded);
+            RefreshDecodedImages();
+        }), System.Windows.Threading.DispatcherPriority.Loaded);
     }
 
     private void AlignRealizedPageToTop(int pageIndex)
@@ -1471,7 +1412,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        StatusTextBlock.Text = $"{Path.GetFileName(_archivePath)} - Page {currentPageIndex + 1}/{Pages.Count}, loaded {GetLoadedRangeText()}, encoded cache {FormatByteSize(GetCacheBytes())}/{FormatByteSize(MaxMediaCacheBytes)}";
+        StatusTextBlock.Text = $"{Path.GetFileName(_archivePath)} - 第 {currentPageIndex + 1}/{Pages.Count} 页，已载入 {GetLoadedRangeText()}，已缓存 {FormatByteSize(GetCacheBytes())}/{FormatByteSize(MaxMediaCacheBytes)}";
     }
 
     private string GetLoadedRangeText()
@@ -1514,7 +1455,7 @@ public partial class MainWindow : Window
         PasswordOpenButton.IsEnabled = false;
         PasswordOverlay.Visibility = Visibility.Visible;
         OpenArchiveButton.IsEnabled = false;
-        Dispatcher.BeginInvoke(() => ArchivePasswordBox.Focus());
+        Dispatcher.BeginInvoke((Action)(() => ArchivePasswordBox.Focus()));
         return _passwordPrompt.Task;
     }
 
@@ -1713,7 +1654,6 @@ public partial class MainWindow : Window
         ComicPage Page,
         string EntryKey,
         ComicMediaType Type,
-        int DecodePixelWidth,
         long ReservedBytes);
 
     private sealed class ArchiveSession : IDisposable
@@ -1853,7 +1793,6 @@ public sealed class ComicPage : INotifyPropertyChanged
     private double _displayWidth;
     private double _displayHeight;
     private VideoCoverLoadStatus _coverLoadStatus;
-    private bool _hasMeasuredAspectRatio;
 
     public ComicPage(int index, string entryKey, ComicMediaType mediaType, long entrySize, double pageWidth)
     {
@@ -1886,10 +1825,6 @@ public sealed class ComicPage : INotifyPropertyChanged
     public ArraySegment<byte>? EncodedImageData => _encodedImageData;
 
     public bool HasEncodedImageData => _encodedImageData is not null;
-
-    public double AspectRatio => _aspectRatio;
-
-    public bool HasMeasuredAspectRatio => _hasMeasuredAspectRatio;
 
     public string DisplayNumber => (Index + 1).ToString(CultureInfo.InvariantCulture);
 
@@ -1957,12 +1892,14 @@ public sealed class ComicPage : INotifyPropertyChanged
 
     public string VideoOverlayText => !IsVideo
         ? ""
-        : !IsVideoPlaying && VideoFrame is null
+        : !IsVideoPlaying
             ? _coverLoadStatus switch
             {
                 VideoCoverLoadStatus.Oversized => "视频过大，点击后加载播放",
-                VideoCoverLoadStatus.Failed => "未能成功加载封面",
-                _ => VideoTimeText
+                VideoCoverLoadStatus.Loading => "正在加载封面...",
+                VideoCoverLoadStatus.Failed => "封面加载失败，点击播放",
+                VideoCoverLoadStatus.Success => "点击播放",
+                _ => "等待加载封面..."
             }
             : VideoTimeText;
 
@@ -1998,7 +1935,6 @@ public sealed class ComicPage : INotifyPropertyChanged
         if (image?.PixelWidth > 0)
         {
             _aspectRatio = (double)image.PixelHeight / image.PixelWidth;
-            _hasMeasuredAspectRatio = true;
         }
 
         Resize(pageWidth);
@@ -2133,7 +2069,6 @@ public sealed class ComicPage : INotifyPropertyChanged
         if (aspectRatio > 0)
         {
             _aspectRatio = aspectRatio;
-            _hasMeasuredAspectRatio = true;
             Resize(pageWidth);
         }
     }
@@ -2202,6 +2137,7 @@ public enum ComicMediaType
 public enum VideoCoverLoadStatus
 {
     None,
+    Loading,
     Success,
     Failed,
     Oversized
