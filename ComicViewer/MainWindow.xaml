@@ -118,12 +118,37 @@
         </Style>
 
         <Style x:Key="PasswordBoxStyle" TargetType="{x:Type PasswordBox}">
-            <Setter Property="Height" Value="34" />
-            <Setter Property="Padding" Value="8,0" />
+            <Setter Property="Height" Value="28" />
+            <Setter Property="Padding" Value="2,0" />
             <Setter Property="VerticalContentAlignment" Value="Center" />
             <Setter Property="Background" Value="{StaticResource AppBackgroundBrush}" />
             <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
             <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type PasswordBox}">
+                        <Border x:Name="PasswordBorder"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="5"
+                                SnapsToDevicePixels="True">
+                            <ScrollViewer x:Name="PART_ContentHost"
+                                          Margin="{TemplateBinding Padding}"
+                                          VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                                <Setter TargetName="PasswordBorder" Property="BorderBrush" Value="{StaticResource OverlayBorderStrongBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="PasswordBorder" Property="Opacity" Value="0.55" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
 
         <Style x:Key="ToolbarButtonStyle" TargetType="{x:Type Button}">
