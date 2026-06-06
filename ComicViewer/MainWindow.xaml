@@ -7,23 +7,137 @@
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         mc:Ignorable="d"
         Title="ComicViewer" Height="1000" Width="700" MinHeight="400" MinWidth="280" WindowStartupLocation="CenterScreen"
-        Background="#111111"
+        Background="{DynamicResource AppBackgroundBrush}"
         ResizeMode="CanResize"
         WindowStyle="None"
         PreviewKeyDown="MainWindow_PreviewKeyDown"
         StateChanged="MainWindow_StateChanged">
     <shell:WindowChrome.WindowChrome>
-        <shell:WindowChrome CaptionHeight="44"
+        <shell:WindowChrome CaptionHeight="40"
                             CornerRadius="0"
                             GlassFrameThickness="1"
                             ResizeBorderThickness="6" />
     </shell:WindowChrome.WindowChrome>
 
     <Window.Resources>
+        <SolidColorBrush x:Key="AppBackgroundBrush" Color="#111111" />
+        <SolidColorBrush x:Key="SurfaceBrush" Color="#202020" />
+        <SolidColorBrush x:Key="SurfaceRaisedBrush" Color="#303030" />
+        <SolidColorBrush x:Key="SurfaceHoverBrush" Color="#3C3C3C" />
+        <SolidColorBrush x:Key="OverlayBrush" Color="#99000000" />
+        <SolidColorBrush x:Key="OverlayHoverBrush" Color="#B0000000" />
+        <SolidColorBrush x:Key="OverlayPressedBrush" Color="#CC000000" />
+        <SolidColorBrush x:Key="OverlayBorderBrush" Color="#88FFFFFF" />
+        <SolidColorBrush x:Key="OverlayBorderStrongBrush" Color="#CCFFFFFF" />
+        <SolidColorBrush x:Key="TextPrimaryBrush" Color="#F2F2F2" />
+        <SolidColorBrush x:Key="TextMutedBrush" Color="#BDBDBD" />
+        <SolidColorBrush x:Key="BorderBrush" Color="#555555" />
+        <SolidColorBrush x:Key="DangerBrush" Color="#C42B1C" />
+        <SolidColorBrush x:Key="DangerPressedBrush" Color="#A4261D" />
+
+        <Style x:Key="PrimaryTextBlockStyle" TargetType="{x:Type TextBlock}">
+            <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+        </Style>
+
+        <Style x:Key="MutedTextBlockStyle"
+               TargetType="{x:Type TextBlock}"
+               BasedOn="{StaticResource PrimaryTextBlockStyle}">
+            <Setter Property="Foreground" Value="{StaticResource TextMutedBrush}" />
+        </Style>
+
+        <Style x:Key="BadgeTextBlockStyle"
+               TargetType="{x:Type TextBlock}"
+               BasedOn="{StaticResource PrimaryTextBlockStyle}">
+            <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+
+        <Style x:Key="OverlayBadgeBorderStyle" TargetType="{x:Type Border}">
+            <Setter Property="Padding" Value="8,3" />
+            <Setter Property="Background" Value="{StaticResource OverlayBrush}" />
+            <Setter Property="CornerRadius" Value="3" />
+        </Style>
+
+        <Style x:Key="PageContainerGridStyle" TargetType="{x:Type Grid}">
+            <Setter Property="HorizontalAlignment" Value="Left" />
+            <Setter Property="Background" Value="{StaticResource AppBackgroundBrush}" />
+            <Setter Property="SnapsToDevicePixels" Value="True" />
+            <Setter Property="UseLayoutRounding" Value="True" />
+        </Style>
+
+        <Style x:Key="ImagePageVisibilityStyle" TargetType="{x:Type Image}">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsImage}" Value="True">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="VideoSurfaceVisibilityStyle" TargetType="{x:Type Grid}">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsVideo}" Value="True">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="VideoFrameVisibilityStyle" TargetType="{x:Type Image}">
+            <Setter Property="Visibility" Value="Visible" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding VideoFrame}" Value="{x:Null}">
+                    <Setter Property="Visibility" Value="Collapsed" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="VideoBadgeBorderStyle"
+               TargetType="{x:Type Border}"
+               BasedOn="{StaticResource OverlayBadgeBorderStyle}">
+            <Setter Property="Margin" Value="6,0,0,0" />
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsVideo}" Value="True">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="PasswordPanelBorderStyle" TargetType="{x:Type Border}">
+            <Setter Property="Width" Value="420" />
+            <Setter Property="MaxWidth" Value="520" />
+            <Setter Property="Padding" Value="22" />
+            <Setter Property="HorizontalAlignment" Value="Center" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="8" />
+        </Style>
+
+        <Style x:Key="PasswordBoxStyle" TargetType="{x:Type PasswordBox}">
+            <Setter Property="Height" Value="34" />
+            <Setter Property="Padding" Value="8,0" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Background" Value="{StaticResource AppBackgroundBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+        </Style>
+
+        <Style x:Key="PasswordHistoryListBoxStyle" TargetType="{x:Type ListBox}">
+            <Setter Property="Height" Value="118" />
+            <Setter Property="Margin" Value="0,8,0,0" />
+            <Setter Property="Background" Value="{StaticResource AppBackgroundBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+        </Style>
+
         <Style x:Key="ToolbarButtonStyle" TargetType="{x:Type Button}">
-            <Setter Property="Background" Value="#303030" />
-            <Setter Property="Foreground" Value="#F2F2F2" />
-            <Setter Property="BorderBrush" Value="#555555" />
+            <Setter Property="Background" Value="{StaticResource SurfaceRaisedBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
             <Setter Property="BorderThickness" Value="1" />
             <Setter Property="Height" Value="28" />
             <Setter Property="FontSize" Value="14" />
@@ -43,12 +157,12 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="ButtonBorder" Property="Background" Value="#3C3C3C" />
-                                <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="#6A6A6A" />
+                                <Setter TargetName="ButtonBorder" Property="Background" Value="{StaticResource SurfaceHoverBrush}" />
+                                <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="{StaticResource BorderBrush}" />
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="ButtonBorder" Property="Background" Value="#252525" />
-                                <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="#777777" />
+                                <Setter TargetName="ButtonBorder" Property="Background" Value="{StaticResource SurfaceBrush}" />
+                                <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="{StaticResource BorderBrush}" />
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.55" />
@@ -65,7 +179,7 @@
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderBrush" Value="Transparent" />
             <Setter Property="BorderThickness" Value="0" />
-            <Setter Property="Foreground" Value="#F2F2F2" />
+            <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
             <Setter Property="FontFamily" Value="Segoe MDL2 Assets" />
             <Setter Property="FontSize" Value="10" />
             <Setter Property="Cursor" Value="Arrow" />
@@ -80,10 +194,10 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="ButtonBorder" Property="Background" Value="#3A3A3A" />
+                                <Setter TargetName="ButtonBorder" Property="Background" Value="{StaticResource SurfaceHoverBrush}" />
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="ButtonBorder" Property="Background" Value="#4A4A4A" />
+                                <Setter TargetName="ButtonBorder" Property="Background" Value="{StaticResource SurfaceRaisedBrush}" />
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -105,12 +219,12 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="ButtonBorder" Property="Background" Value="#C42B1C" />
-                                <Setter Property="Foreground" Value="White" />
+                                <Setter TargetName="ButtonBorder" Property="Background" Value="{StaticResource DangerBrush}" />
+                                <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="ButtonBorder" Property="Background" Value="#A4261D" />
-                                <Setter Property="Foreground" Value="White" />
+                                <Setter TargetName="ButtonBorder" Property="Background" Value="{StaticResource DangerPressedBrush}" />
+                                <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -121,9 +235,9 @@
         <Style x:Key="PlayOverlayButtonStyle" TargetType="{x:Type Button}">
             <Setter Property="Width" Value="100" />
             <Setter Property="Height" Value="100" />
-            <Setter Property="Background" Value="#99000000" />
-            <Setter Property="Foreground" Value="White" />
-            <Setter Property="BorderBrush" Value="#88FFFFFF" />
+            <Setter Property="Background" Value="{StaticResource OverlayBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource OverlayBorderBrush}" />
             <Setter Property="BorderThickness" Value="1" />
             <Setter Property="FontFamily" Value="Segoe UI Emoji" />
             <Setter Property="FontSize" Value="36" />
@@ -150,11 +264,11 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="ButtonBorder" Property="Background" Value="#B0000000" />
-                                <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="#CCFFFFFF" />
+                                <Setter TargetName="ButtonBorder" Property="Background" Value="{StaticResource OverlayHoverBrush}" />
+                                <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="{StaticResource OverlayBorderStrongBrush}" />
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="ButtonBorder" Property="Background" Value="#CC000000" />
+                                <Setter TargetName="ButtonBorder" Property="Background" Value="{StaticResource OverlayPressedBrush}" />
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -184,8 +298,8 @@
         </Style>
 
         <Style x:Key="ComicScrollBarThumbStyle" TargetType="{x:Type Thumb}">
-            <Setter Property="Background" Value="#99000000" />
-            <Setter Property="BorderBrush" Value="#88FFFFFF" />
+            <Setter Property="Background" Value="{StaticResource OverlayBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource OverlayBorderBrush}" />
             <Setter Property="BorderThickness" Value="1" />
             <Setter Property="Template">
                 <Setter.Value>
@@ -199,12 +313,12 @@
                                 SnapsToDevicePixels="True" />
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="ThumbBorder" Property="Background" Value="#B0000000" />
-                                <Setter TargetName="ThumbBorder" Property="BorderBrush" Value="#CCFFFFFF" />
+                                <Setter TargetName="ThumbBorder" Property="Background" Value="{StaticResource OverlayHoverBrush}" />
+                                <Setter TargetName="ThumbBorder" Property="BorderBrush" Value="{StaticResource OverlayBorderStrongBrush}" />
                             </Trigger>
                             <Trigger Property="IsDragging" Value="True">
-                                <Setter TargetName="ThumbBorder" Property="Background" Value="#CC000000" />
-                                <Setter TargetName="ThumbBorder" Property="BorderBrush" Value="#E6FFFFFF" />
+                                <Setter TargetName="ThumbBorder" Property="Background" Value="{StaticResource OverlayPressedBrush}" />
+                                <Setter TargetName="ThumbBorder" Property="BorderBrush" Value="{StaticResource OverlayBorderStrongBrush}" />
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -293,7 +407,7 @@
         </Style>
 
         <Style x:Key="ComicPagesListBoxStyle" TargetType="{x:Type ListBox}">
-            <Setter Property="Background" Value="#111111" />
+            <Setter Property="Background" Value="{StaticResource AppBackgroundBrush}" />
             <Setter Property="BorderThickness" Value="0" />
             <Setter Property="Padding" Value="0" />
             <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
@@ -337,7 +451,9 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <DockPanel Grid.Row="0" Background="#202020" LastChildFill="True">
+        <DockPanel Grid.Row="0"
+                   Background="{StaticResource SurfaceBrush}"
+                   LastChildFill="True">
             <Button x:Name="OpenArchiveButton"
                     DockPanel.Dock="Left"
                     MinWidth="96"
@@ -366,7 +482,7 @@
                     Content="&#xE921;" />
             <TextBlock x:Name="StatusTextBlock"
                        VerticalAlignment="Center"
-                       Foreground="#D8D8D8"
+                       Foreground="{StaticResource TextMutedBrush}"
                        TextTrimming="CharacterEllipsis"
                        Text="请选择 zip 或 rar 漫画压缩包" />
         </DockPanel>
@@ -382,51 +498,19 @@
                 <DataTemplate>
                     <Grid Width="{Binding DisplayWidth}"
                           Height="{Binding DisplayHeight}"
-                          HorizontalAlignment="Left"
-                          Background="#050505"
-                          SnapsToDevicePixels="True"
-                          UseLayoutRounding="True">
+                          Style="{StaticResource PageContainerGridStyle}">
                         <Image Source="{Binding Image}"
-                               Stretch="Fill">
-                            <Image.Style>
-                                <Style TargetType="Image">
-                                    <Setter Property="Visibility" Value="Collapsed" />
-                                    <Style.Triggers>
-                                        <DataTrigger Binding="{Binding IsImage}" Value="True">
-                                            <Setter Property="Visibility" Value="Visible" />
-                                        </DataTrigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </Image.Style>
-                        </Image>
+                               Stretch="Fill"
+                               Style="{StaticResource ImagePageVisibilityStyle}" />
 
                         <Grid Background="Transparent"
-                              MouseLeftButtonDown="VideoSurface_MouseLeftButtonDown">
-                            <Grid.Style>
-                                <Style TargetType="Grid">
-                                    <Setter Property="Visibility" Value="Collapsed" />
-                                    <Style.Triggers>
-                                        <DataTrigger Binding="{Binding IsVideo}" Value="True">
-                                            <Setter Property="Visibility" Value="Visible" />
-                                        </DataTrigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </Grid.Style>
+                              MouseLeftButtonDown="VideoSurface_MouseLeftButtonDown"
+                              Style="{StaticResource VideoSurfaceVisibilityStyle}">
 
                             <Image Source="{Binding VideoFrame}"
                                    Stretch="Uniform"
-                                   IsHitTestVisible="False">
-                                <Image.Style>
-                                    <Style TargetType="Image">
-                                        <Setter Property="Visibility" Value="Visible" />
-                                        <Style.Triggers>
-                                            <DataTrigger Binding="{Binding VideoFrame}" Value="{x:Null}">
-                                                <Setter Property="Visibility" Value="Collapsed" />
-                                            </DataTrigger>
-                                        </Style.Triggers>
-                                    </Style>
-                                </Image.Style>
-                            </Image>
+                                   IsHitTestVisible="False"
+                                   Style="{StaticResource VideoFrameVisibilityStyle}" />
 
                             <Button HorizontalAlignment="Center"
                                     VerticalAlignment="Center"
@@ -440,31 +524,12 @@
                                     Margin="8"
                                     Orientation="Horizontal"
                                     IsHitTestVisible="False">
-                            <Border Padding="8,3"
-                                    Background="#99000000"
-                                    CornerRadius="3">
-                                <TextBlock Foreground="White"
-                                           FontSize="13"
-                                           FontWeight="SemiBold"
+                            <Border Style="{StaticResource OverlayBadgeBorderStyle}">
+                                <TextBlock Style="{StaticResource BadgeTextBlockStyle}"
                                            Text="{Binding DisplayNumber}" />
                             </Border>
-                            <Border Margin="6,0,0,0"
-                                    Padding="8,3"
-                                    Background="#99000000"
-                                    CornerRadius="3">
-                                <Border.Style>
-                                    <Style TargetType="Border">
-                                        <Setter Property="Visibility" Value="Collapsed" />
-                                        <Style.Triggers>
-                                            <DataTrigger Binding="{Binding IsVideo}" Value="True">
-                                                <Setter Property="Visibility" Value="Visible" />
-                                            </DataTrigger>
-                                        </Style.Triggers>
-                                    </Style>
-                                </Border.Style>
-                                <TextBlock Foreground="White"
-                                           FontSize="13"
-                                           FontWeight="SemiBold"
+                            <Border Style="{StaticResource VideoBadgeBorderStyle}">
+                                <TextBlock Style="{StaticResource BadgeTextBlockStyle}"
                                            Text="{Binding VideoOverlayText}" />
                             </Border>
                         </StackPanel>
@@ -475,17 +540,9 @@
 
         <Grid x:Name="PasswordOverlay"
               Grid.Row="1"
-              Background="#CC000000"
+              Background="{StaticResource OverlayPressedBrush}"
               Visibility="Collapsed">
-            <Border Width="420"
-                    MaxWidth="520"
-                    Padding="22"
-                    HorizontalAlignment="Center"
-                    VerticalAlignment="Center"
-                    Background="#202020"
-                    BorderBrush="#555555"
-                    BorderThickness="1"
-                    CornerRadius="8">
+            <Border Style="{StaticResource PasswordPanelBorderStyle}">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
@@ -497,25 +554,20 @@
 
                     <TextBlock Grid.Row="0"
                                Text="输入压缩包密码"
-                               Foreground="#F2F2F2"
                                FontSize="18"
-                               FontWeight="SemiBold" />
+                               FontWeight="SemiBold"
+                               Style="{StaticResource PrimaryTextBlockStyle}" />
 
                     <TextBlock x:Name="PasswordArchiveNameTextBlock"
                                Grid.Row="1"
                                Margin="0,8,0,0"
-                               Foreground="#BDBDBD"
-                               TextTrimming="CharacterEllipsis" />
+                               TextTrimming="CharacterEllipsis"
+                               Style="{StaticResource MutedTextBlockStyle}" />
 
                     <PasswordBox x:Name="ArchivePasswordBox"
                                  Grid.Row="2"
-                                 Height="34"
                                  Margin="0,16,0,0"
-                                 Padding="8,0"
-                                 VerticalContentAlignment="Center"
-                                 Background="#111111"
-                                 Foreground="#F2F2F2"
-                                 BorderBrush="#666666"
+                                 Style="{StaticResource PasswordBoxStyle}"
                                  KeyDown="ArchivePasswordBox_KeyDown"
                                  PasswordChanged="ArchivePasswordBox_PasswordChanged"/>
 
@@ -528,17 +580,13 @@
 
                         <TextBlock Grid.Row="0"
                                    Text="历史密码（双击使用）"
-                                   Foreground="#BDBDBD"
-                                   FontSize="13" />
+                                   FontSize="13"
+                                   Style="{StaticResource MutedTextBlockStyle}" />
 
                         <ListBox x:Name="PasswordHistoryListBox"
                                  Grid.Row="1"
-                                 Height="118"
-                                 Margin="0,8,0,0"
                                  ItemsSource="{Binding PasswordHistory}"
-                                 Background="#151515"
-                                 Foreground="#F2F2F2"
-                                 BorderBrush="#444444"
+                                 Style="{StaticResource PasswordHistoryListBoxStyle}"
                                  MouseDoubleClick="PasswordHistoryListBox_MouseDoubleClick" />
                     </Grid>
 
