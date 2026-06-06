@@ -206,8 +206,10 @@ public partial class MainWindow : Window
                         hasTriedAnyKnownPassword = true;
                         try
                         {
-                            if (await TryKnownPasswordsAsync(archivePath, knownPasswords))
+                            var knownPasswordResult = await TryKnownPasswordsAsync(archivePath, knownPasswords);
+                            if (knownPasswordResult is not null)
                             {
+                                ApplyArchiveSession(knownPasswordResult.Session, archivePath, knownPasswordResult.Password);
                                 return;
                             }
                         }
@@ -250,30 +252,86 @@ public partial class MainWindow : Window
             .ToList();
     }
 
-    private async Task<bool> TryKnownPasswordsAsync(string archivePath, IReadOnlyList<string> knownPasswords)
+    private async Task<KnownPasswordResult?> TryKnownPasswordsAsync(string archivePath, IReadOnlyList<string> knownPasswords)
     {
-        for (var index = 0; index < knownPasswords.Count; index++)
+        _isLoadingArchive = true;
+        SetLoadingState(true, $"正在尝试 {knownPasswords.Count} 个已知密码 ...");
+
+        var nextPasswordIndex = -1;
+        var hasResult = 0;
+        var maxConcurrency = Math.Min(knownPasswords.Count, Math.Clamp(Environment.ProcessorCount / 2, 2, 4));
+        var resultLock = new object();
+        using var cancellation = new CancellationTokenSource();
+        KnownPasswordResult? result = null;
+        Exception? unexpectedException = null;
+
+        async Task TryPasswordWorkerAsync()
         {
-            try
+            while (!cancellation.IsCancellationRequested)
             {
-                await LoadArchiveAsync(
-                    archivePath,
-                    knownPasswords[index],
-                    $"正在尝试已知密码 {index + 1}/{knownPasswords.Count} ...");
-                return true;
-            }
-            catch (Exception ex) when (IsLikelyPasswordProblem(ex))
-            {
-                ResetReader();
-            }
-            finally
-            {
-                _isLoadingArchive = false;
-                SetLoadingState(false);
+                var passwordIndex = Interlocked.Increment(ref nextPasswordIndex);
+                if (passwordIndex >= knownPasswords.Count)
+                {
+                    return;
+                }
+
+                var password = knownPasswords[passwordIndex];
+                try
+                {
+                    var session = await Task.Run(() => ArchiveSession.Open(archivePath, password), cancellation.Token);
+                    if (Interlocked.CompareExchange(ref hasResult, 1, 0) == 0)
+                    {
+                        lock (resultLock)
+                        {
+                            result = new KnownPasswordResult(password, session);
+                        }
+
+                        await cancellation.CancelAsync();
+                    }
+                    else
+                    {
+                        DisposeArchiveSessionInBackground(session);
+                    }
+
+                    return;
+                }
+                catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex) when (IsLikelyPasswordProblem(ex))
+                {
+                }
+                catch (Exception ex)
+                {
+                    lock (resultLock)
+                    {
+                        unexpectedException ??= ex;
+                    }
+
+                    await cancellation.CancelAsync();
+                    return;
+                }
             }
         }
 
-        return false;
+        var workers = Enumerable.Range(0, maxConcurrency)
+            .Select(_ => TryPasswordWorkerAsync())
+            .ToArray();
+
+        await Task.WhenAll(workers);
+
+        if (result is not null)
+        {
+            return result;
+        }
+
+        if (unexpectedException is not null)
+        {
+            throw unexpectedException;
+        }
+
+        return null;
     }
 
     private async Task LoadArchiveAsync(string archivePath, string? password, string loadingStatus)
@@ -284,6 +342,11 @@ public partial class MainWindow : Window
         UpdatePageWidth();
 
         var session = await Task.Run(() => ArchiveSession.Open(archivePath, password));
+        ApplyArchiveSession(session, archivePath, password);
+    }
+
+    private void ApplyArchiveSession(ArchiveSession session, string archivePath, string? password)
+    {
         var pages = session.MediaEntries
             .Select((entry, index) => new ComicPage(index, entry.Key, entry.Type, entry.Size, _pageWidth))
             .ToList();
@@ -1713,6 +1776,8 @@ public partial class MainWindow : Window
         ArraySegment<byte>? VideoData,
         ImageSource? VideoFrame,
         long EstimatedBytes);
+
+    private sealed record KnownPasswordResult(string Password, ArchiveSession Session);
 
     private sealed record MediaLoadRequest(
         int PageIndex,
