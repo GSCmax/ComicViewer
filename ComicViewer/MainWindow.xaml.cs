@@ -181,42 +181,14 @@ public partial class MainWindow : Window
     private async Task LoadArchiveWithPasswordRetryAsync(string archivePath, string? initialPassword = null)
     {
         var password = initialPassword;
+        var hasTriedKnownPasswords = false;
+        var hasTriedAnyKnownPassword = false;
 
         while (true)
         {
             try
             {
-                _isLoadingArchive = true;
-                SetLoadingState(true, $"正在读取目录 {Path.GetFileName(archivePath)} ...");
-                ResetReader();
-                UpdatePageWidth();
-
-                var session = await Task.Run(() => ArchiveSession.Open(archivePath, password));
-                var pages = session.MediaEntries
-                    .Select((entry, index) => new ComicPage(index, entry.Key, entry.Type, entry.Size, _pageWidth))
-                    .ToList();
-
-                _archiveSession = session;
-                _archivePath = archivePath;
-
-                Pages.Clear();
-                foreach (var page in pages)
-                {
-                    Pages.Add(page);
-                }
-
-                GetPagesScrollViewer()?.ScrollToTop();
-                if (Pages.Count == 0)
-                {
-                    StatusTextBlock.Text = "压缩包中没有找到支持的图片或视频文件";
-                    return;
-                }
-
-                RememberPassword(password);
-                UpdatePageWidth();
-                UpdateReadingStatus(0);
-                StartMediaLoading(0);
-                RefreshDecodedImages();
+                await LoadArchiveAsync(archivePath, password, $"正在读取目录 {Path.GetFileName(archivePath)} ...");
                 return;
             }
             catch (Exception ex) when (IsLikelyPasswordProblem(ex))
@@ -225,7 +197,30 @@ public partial class MainWindow : Window
                 _isLoadingArchive = false;
                 SetLoadingState(false);
 
-                password = await ShowPasswordOverlayAsync(archivePath);
+                if (!hasTriedKnownPasswords)
+                {
+                    hasTriedKnownPasswords = true;
+                    var knownPasswords = GetKnownPasswordsToTry(password);
+                    if (knownPasswords.Count > 0)
+                    {
+                        hasTriedAnyKnownPassword = true;
+                        try
+                        {
+                            if (await TryKnownPasswordsAsync(archivePath, knownPasswords))
+                            {
+                                return;
+                            }
+                        }
+                        catch (Exception knownPasswordException)
+                        {
+                            ResetReader();
+                            ShowOpenArchiveError(knownPasswordException);
+                            return;
+                        }
+                    }
+                }
+
+                password = await ShowPasswordOverlayAsync(archivePath, hasTriedAnyKnownPassword);
                 if (password is null)
                 {
                     StatusTextBlock.Text = "已取消打开压缩包";
@@ -235,8 +230,7 @@ public partial class MainWindow : Window
             catch (Exception ex)
             {
                 ResetReader();
-                StatusTextBlock.Text = "打开失败";
-                MessageBox.Show(this, ex.Message, "无法打开压缩包", MessageBoxButton.OK, MessageBoxImage.Error);
+                ShowOpenArchiveError(ex);
                 return;
             }
             finally
@@ -245,6 +239,82 @@ public partial class MainWindow : Window
                 SetLoadingState(false);
             }
         }
+    }
+
+    private List<string> GetKnownPasswordsToTry(string? skippedPassword)
+    {
+        return PasswordHistory
+            .Where(password => !string.IsNullOrWhiteSpace(password))
+            .Distinct(StringComparer.Ordinal)
+            .Where(password => !string.Equals(password, skippedPassword, StringComparison.Ordinal))
+            .ToList();
+    }
+
+    private async Task<bool> TryKnownPasswordsAsync(string archivePath, IReadOnlyList<string> knownPasswords)
+    {
+        for (var index = 0; index < knownPasswords.Count; index++)
+        {
+            try
+            {
+                await LoadArchiveAsync(
+                    archivePath,
+                    knownPasswords[index],
+                    $"正在尝试已知密码 {index + 1}/{knownPasswords.Count} ...");
+                return true;
+            }
+            catch (Exception ex) when (IsLikelyPasswordProblem(ex))
+            {
+                ResetReader();
+            }
+            finally
+            {
+                _isLoadingArchive = false;
+                SetLoadingState(false);
+            }
+        }
+
+        return false;
+    }
+
+    private async Task LoadArchiveAsync(string archivePath, string? password, string loadingStatus)
+    {
+        _isLoadingArchive = true;
+        SetLoadingState(true, loadingStatus);
+        ResetReader();
+        UpdatePageWidth();
+
+        var session = await Task.Run(() => ArchiveSession.Open(archivePath, password));
+        var pages = session.MediaEntries
+            .Select((entry, index) => new ComicPage(index, entry.Key, entry.Type, entry.Size, _pageWidth))
+            .ToList();
+
+        _archiveSession = session;
+        _archivePath = archivePath;
+
+        Pages.Clear();
+        foreach (var page in pages)
+        {
+            Pages.Add(page);
+        }
+
+        GetPagesScrollViewer()?.ScrollToTop();
+        if (Pages.Count == 0)
+        {
+            StatusTextBlock.Text = "压缩包中没有找到支持的图片或视频文件";
+            return;
+        }
+
+        RememberPassword(password);
+        UpdatePageWidth();
+        UpdateReadingStatus(0);
+        StartMediaLoading(0);
+        RefreshDecodedImages();
+    }
+
+    private void ShowOpenArchiveError(Exception exception)
+    {
+        StatusTextBlock.Text = "打开失败";
+        MessageBox.Show(this, exception.Message, "无法打开压缩包", MessageBoxButton.OK, MessageBoxImage.Error);
     }
 
     private void ResetReader()
@@ -1446,10 +1516,13 @@ public partial class MainWindow : Window
             : $"{bytes / 1024d / 1024d:0.0}MB";
     }
 
-    private Task<string?> ShowPasswordOverlayAsync(string archivePath)
+    private Task<string?> ShowPasswordOverlayAsync(string archivePath, bool knownPasswordsTried)
     {
         _passwordPrompt?.TrySetResult(null);
         _passwordPrompt = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        PasswordPromptTextBlock.Text = knownPasswordsTried
+            ? "所有已知密码均无法解锁，请输入正确密码"
+            : "请输入压缩包密码";
         PasswordArchiveNameTextBlock.Text = Path.GetFileName(archivePath);
         ArchivePasswordBox.Clear();
         PasswordOpenButton.IsEnabled = false;
@@ -1501,14 +1574,6 @@ public partial class MainWindow : Window
     private void ArchivePasswordBox_PasswordChanged(object sender, RoutedEventArgs e)
     {
         PasswordOpenButton.IsEnabled = !string.IsNullOrWhiteSpace(ArchivePasswordBox.Password);
-    }
-
-    private void PasswordHistoryListBox_MouseDoubleClick(object sender, MouseButtonEventArgs e)
-    {
-        if (PasswordHistoryListBox.SelectedItem is string password)
-        {
-            CompletePasswordPrompt(password);
-        }
     }
 
     private static string PasswordHistoryFilePath =>

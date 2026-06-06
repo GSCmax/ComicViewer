@@ -108,7 +108,7 @@
         <Style x:Key="PasswordPanelBorderStyle" TargetType="{x:Type Border}">
             <Setter Property="Width" Value="420" />
             <Setter Property="MaxWidth" Value="520" />
-            <Setter Property="Padding" Value="22" />
+            <Setter Property="Padding" Value="10" />
             <Setter Property="HorizontalAlignment" Value="Center" />
             <Setter Property="VerticalAlignment" Value="Center" />
             <Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
@@ -121,14 +121,6 @@
             <Setter Property="Height" Value="34" />
             <Setter Property="Padding" Value="8,0" />
             <Setter Property="VerticalContentAlignment" Value="Center" />
-            <Setter Property="Background" Value="{StaticResource AppBackgroundBrush}" />
-            <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
-            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
-        </Style>
-
-        <Style x:Key="PasswordHistoryListBoxStyle" TargetType="{x:Type ListBox}">
-            <Setter Property="Height" Value="118" />
-            <Setter Property="Margin" Value="0,8,0,0" />
             <Setter Property="Background" Value="{StaticResource AppBackgroundBrush}" />
             <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
             <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
@@ -549,53 +541,35 @@
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
 
-                    <TextBlock Grid.Row="0"
+                    <TextBlock x:Name="PasswordPromptTextBlock"
+                               Grid.Row="0"
                                Text="输入压缩包密码"
                                FontSize="18"
                                FontWeight="SemiBold"
+                               TextWrapping="Wrap"
                                Style="{StaticResource PrimaryTextBlockStyle}" />
 
                     <TextBlock x:Name="PasswordArchiveNameTextBlock"
                                Grid.Row="1"
-                               Margin="0,8,0,0"
+                               Margin="0,6,0,0"
                                TextTrimming="CharacterEllipsis"
                                Style="{StaticResource MutedTextBlockStyle}" />
 
                     <PasswordBox x:Name="ArchivePasswordBox"
                                  Grid.Row="2"
-                                 Margin="0,16,0,0"
+                                 Margin="0,10,0,0"
                                  Style="{StaticResource PasswordBoxStyle}"
                                  KeyDown="ArchivePasswordBox_KeyDown"
                                  PasswordChanged="ArchivePasswordBox_PasswordChanged"/>
 
-                    <Grid Grid.Row="3"
-                          Margin="0,16,0,0">
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto" />
-                            <RowDefinition Height="Auto" />
-                        </Grid.RowDefinitions>
-
-                        <TextBlock Grid.Row="0"
-                                   Text="历史密码（双击使用）"
-                                   FontSize="13"
-                                   Style="{StaticResource MutedTextBlockStyle}" />
-
-                        <ListBox x:Name="PasswordHistoryListBox"
-                                 Grid.Row="1"
-                                 ItemsSource="{Binding PasswordHistory}"
-                                 Style="{StaticResource PasswordHistoryListBoxStyle}"
-                                 MouseDoubleClick="PasswordHistoryListBox_MouseDoubleClick" />
-                    </Grid>
-
-                    <StackPanel Grid.Row="4"
-                                Margin="0,18,0,0"
+                    <StackPanel Grid.Row="3"
+                                Margin="0,10,0,0"
                                 Orientation="Horizontal"
                                 HorizontalAlignment="Right">
                         <Button MinWidth="82"
-                                Margin="0,0,8,0"
+                                Margin="0,0,10,0"
                                 Style="{StaticResource ToolbarButtonStyle}"
                                 Click="PasswordCancelButton_Click"
                                 Content="取消" />
