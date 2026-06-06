@@ -6,7 +6,7 @@
         xmlns:local="clr-namespace:ComicViewer"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         mc:Ignorable="d"
-        Title="ComicViewer" Height="1100" Width="800" MinHeight="420" MinWidth="360" WindowStartupLocation="CenterScreen"
+        Title="ComicViewer" Height="1000" Width="700" MinHeight="400" MinWidth="280" WindowStartupLocation="CenterScreen"
         Background="#111111"
         ResizeMode="CanResize"
         WindowStyle="None"
@@ -61,7 +61,7 @@
 
         <Style x:Key="CaptionButtonStyle" TargetType="{x:Type Button}">
             <Setter Property="Width" Value="46" />
-            <Setter Property="Height" Value="44" />
+            <Setter Property="Height" Value="40" />
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderBrush" Value="Transparent" />
             <Setter Property="BorderThickness" Value="0" />
@@ -341,7 +341,7 @@
             <Button x:Name="OpenArchiveButton"
                     DockPanel.Dock="Left"
                     MinWidth="96"
-                    Margin="10,8"
+                    Margin="6"
                     shell:WindowChrome.IsHitTestVisibleInChrome="True"
                     Style="{StaticResource ToolbarButtonStyle}"
                     Click="OpenArchiveButton_Click"
