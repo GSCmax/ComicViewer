@@ -188,7 +188,7 @@ public partial class MainWindow : Window
         {
             try
             {
-                await LoadArchiveAsync(archivePath, password, $"正在读取目录 {Path.GetFileName(archivePath)} ...");
+                await LoadArchiveAsync(archivePath, password);
                 return;
             }
             catch (Exception ex) when (IsLikelyPasswordProblem(ex))
@@ -206,10 +206,10 @@ public partial class MainWindow : Window
                         hasTriedAnyKnownPassword = true;
                         try
                         {
-                            var knownPasswordResult = await TryKnownPasswordsAsync(archivePath, knownPasswords);
-                            if (knownPasswordResult is not null)
+                            var knownPassword = await TryKnownPasswordsAsync(archivePath, knownPasswords);
+                            if (knownPassword is not null)
                             {
-                                ApplyArchiveSession(knownPasswordResult.Session, archivePath, knownPasswordResult.Password);
+                                await LoadArchiveAsync(archivePath, knownPassword);
                                 return;
                             }
                         }
@@ -252,7 +252,7 @@ public partial class MainWindow : Window
             .ToList();
     }
 
-    private async Task<KnownPasswordResult?> TryKnownPasswordsAsync(string archivePath, IReadOnlyList<string> knownPasswords)
+    private async Task<string?> TryKnownPasswordsAsync(string archivePath, IReadOnlyList<string> knownPasswords)
     {
         _isLoadingArchive = true;
         SetLoadingState(true, $"正在尝试 {knownPasswords.Count} 个已知密码 ...");
@@ -262,7 +262,7 @@ public partial class MainWindow : Window
         var maxConcurrency = Math.Min(knownPasswords.Count, Math.Clamp(Environment.ProcessorCount / 2, 2, 4));
         var resultLock = new object();
         using var cancellation = new CancellationTokenSource();
-        KnownPasswordResult? result = null;
+        string? result = null;
         Exception? unexpectedException = null;
 
         async Task TryPasswordWorkerAsync()
@@ -278,19 +278,15 @@ public partial class MainWindow : Window
                 var password = knownPasswords[passwordIndex];
                 try
                 {
-                    var session = await Task.Run(() => ArchiveSession.Open(archivePath, password), cancellation.Token);
+                    await Task.Run(() => ArchiveSession.VerifyPassword(archivePath, password), cancellation.Token);
                     if (Interlocked.CompareExchange(ref hasResult, 1, 0) == 0)
                     {
                         lock (resultLock)
                         {
-                            result = new KnownPasswordResult(password, session);
+                            result = password;
                         }
 
                         await cancellation.CancelAsync();
-                    }
-                    else
-                    {
-                        DisposeArchiveSessionInBackground(session);
                     }
 
                     return;
@@ -334,10 +330,10 @@ public partial class MainWindow : Window
         return null;
     }
 
-    private async Task LoadArchiveAsync(string archivePath, string? password, string loadingStatus)
+    private async Task LoadArchiveAsync(string archivePath, string? password)
     {
         _isLoadingArchive = true;
-        SetLoadingState(true, loadingStatus);
+        SetLoadingState(true, $"正在读取目录 {Path.GetFileName(archivePath)} ...");
         ResetReader();
         UpdatePageWidth();
 
@@ -1545,7 +1541,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        StatusTextBlock.Text = $"{Path.GetFileName(_archivePath)} - 第 {currentPageIndex + 1}/{Pages.Count} 页，已载入 {GetLoadedRangeText()}，已缓存 {FormatByteSize(GetCacheBytes())}/{FormatByteSize(MaxMediaCacheBytes)}";
+        StatusTextBlock.Text = $"{Path.GetFileName(_archivePath)} - 第 {currentPageIndex + 1}/{Pages.Count} 页，已载入 {GetLoadedRangeText()}";
     }
 
     private string GetLoadedRangeText()
@@ -1562,14 +1558,6 @@ public partial class MainWindow : Window
         return loaded.Count == 1
             ? loaded[0].ToString(CultureInfo.InvariantCulture)
             : $"{loaded.Min()}-{loaded.Max()} ({loaded.Count})";
-    }
-
-    private long GetCacheBytes()
-    {
-        lock (_cacheLock)
-        {
-            return _cacheBytes;
-        }
     }
 
     private static string FormatByteSize(long bytes)
@@ -1777,8 +1765,6 @@ public partial class MainWindow : Window
         ImageSource? VideoFrame,
         long EstimatedBytes);
 
-    private sealed record KnownPasswordResult(string Password, ArchiveSession Session);
-
     private sealed record MediaLoadRequest(
         int PageIndex,
         ComicPage Page,
@@ -1833,6 +1819,22 @@ public partial class MainWindow : Window
             {
                 archive.Dispose();
                 throw;
+            }
+        }
+
+        public static void VerifyPassword(string archivePath, string password)
+        {
+            using var archive = ArchiveFactory.OpenArchive(archivePath, new ReaderOptions
+            {
+                Password = password
+            });
+
+            var firstMediaEntry = archive.Entries
+                .FirstOrDefault(entry => !entry.IsDirectory && entry.Key is not null && IsSupportedMediaFile(entry.Key));
+            if (firstMediaEntry is not null)
+            {
+                using var stream = firstMediaEntry.OpenEntryStream();
+                _ = stream.ReadByte();
             }
         }
 
