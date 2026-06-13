@@ -123,8 +123,8 @@ public partial class MainWindow : Window
     {
         var dialog = new OpenFileDialog
         {
-            Title = "Open comic archive",
-            Filter = "Comic archives (*.zip;*.rar)|*.zip;*.rar|ZIP files (*.zip)|*.zip|RAR files (*.rar)|*.rar|All files (*.*)|*.*",
+            Title = "打开漫画压缩包",
+            Filter = "漫画压缩包 (*.zip;*.rar)|*.zip;*.rar|ZIP 文件 (*.zip)|*.zip|RAR 文件 (*.rar)|*.rar|所有文件 (*.*)|*.*",
             CheckFileExists = true
         };
 
@@ -232,7 +232,7 @@ public partial class MainWindow : Window
                 password = await ShowPasswordOverlayAsync(archivePath, hasTriedAnyKnownPassword);
                 if (password is null)
                 {
-                    StatusTextBlock.Text = "Open archive canceled";
+                    StatusTextBlock.Text = "已取消打开压缩包";
                     return;
                 }
             }
@@ -262,7 +262,7 @@ public partial class MainWindow : Window
     private async Task<string?> TryKnownPasswordsAsync(string archivePath, IReadOnlyList<string> knownPasswords)
     {
         _isLoadingArchive = true;
-        SetLoadingState(true, $"婵犳鍠楃换鎰緤閽樺鑰挎い蹇撴閻掑﹥绻濋棃娑冲姛婵?{knownPasswords.Count} 濠电偞鍨堕幖鈺傜濠婂牆绀勯柨鐔哄У閸庢鏌曟径鍫濆姢婵″弶娲熼弻?...");
+        SetLoadingState(true, $"正在尝试 {knownPasswords.Count} 个历史密码...");
 
         var nextPasswordIndex = -1;
         var hasResult = 0;
@@ -340,7 +340,7 @@ public partial class MainWindow : Window
     private async Task LoadArchiveAsync(string archivePath, string? password)
     {
         _isLoadingArchive = true;
-        SetLoadingState(true, $"婵犳鍠楃换鎰緤閽樺鑰挎い蹇撴鐎氭岸鎮归崶銊ョ祷缂佹彃娼￠弻锝夊煛婵犲倹鐏堢紓?{Path.GetFileName(archivePath)} ...");
+        SetLoadingState(true, $"正在打开压缩包：{Path.GetFileName(archivePath)} ...");
         ResetReader();
         UpdatePageWidth();
 
@@ -366,7 +366,7 @@ public partial class MainWindow : Window
         GetPagesScrollViewer()?.ScrollToTop();
         if (Pages.Count == 0)
         {
-            StatusTextBlock.Text = "No supported images or videos found in the archive";
+            StatusTextBlock.Text = "压缩包中没有找到支持的图片或视频";
             return;
         }
 
@@ -379,8 +379,8 @@ public partial class MainWindow : Window
 
     private void ShowOpenArchiveError(Exception exception)
     {
-        StatusTextBlock.Text = "Open failed";
-        MessageBox.Show(this, exception.Message, "Cannot open archive", MessageBoxButton.OK, MessageBoxImage.Error);
+        StatusTextBlock.Text = "打开失败";
+        MessageBox.Show(this, exception.Message, "无法打开压缩包", MessageBoxButton.OK, MessageBoxImage.Error);
     }
 
     private void ResetReader()
@@ -626,7 +626,7 @@ public partial class MainWindow : Window
             _failedMedia.Add(request.EntryKey);
         }
 
-        StatusTextBlock.Text = $"{(request.Type == ComicMediaType.Image ? "Image" : "Video")} load failed: {Path.GetFileName(request.EntryKey)} - {exception.Message}";
+        StatusTextBlock.Text = $"{(request.Type == ComicMediaType.Image ? "图片" : "视频")}加载失败：{Path.GetFileName(request.EntryKey)} - {exception.Message}";
     }
 
     private void FinishStaleRead(MediaReadRequest request)
@@ -966,11 +966,11 @@ public partial class MainWindow : Window
         using var cachedPlaybackProbe = TryCreateCachedVideoStream(page.EntryKey);
         if (page.EntrySize > MaxInMemoryVideoPlaybackBytes && cachedPlaybackProbe is null)
         {
-            StatusTextBlock.Text = $"Video is too large to load into memory: {Path.GetFileName(page.EntryKey)}";
+            StatusTextBlock.Text = $"视频过大，无法载入内存：{Path.GetFileName(page.EntryKey)}";
             MessageBox.Show(
                 this,
-                $"This video is {FormatByteSize(page.EntrySize)}, which exceeds the in-memory playback limit {FormatByteSize(MaxInMemoryVideoPlaybackBytes)}.\\n\\nTo avoid freezes or memory exhaustion, it will not be loaded fully into memory or written to a temp file.",
-                "Video too large",
+                $"该视频大小为 {FormatByteSize(page.EntrySize)}，超过内存播放上限 {FormatByteSize(MaxInMemoryVideoPlaybackBytes)}。\\n\\n为避免卡顿或内存耗尽，程序不会将它完整载入内存，也不会写入临时文件。",
+                "视频过大",
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
             return;
@@ -986,7 +986,7 @@ public partial class MainWindow : Window
         {
             StopOtherVideos(page);
             page.StopVideo();
-            StatusTextBlock.Text = $"Preparing video {Path.GetFileName(page.EntryKey)} ...";
+            StatusTextBlock.Text = $"正在准备视频：{Path.GetFileName(page.EntryKey)} ...";
 
             videoStream = TryCreateCachedVideoStream(page.EntryKey)
                 ?? await Task.Run(() => _archiveSession?.CopyEntryToMemory(page.EntryKey, cancellationToken), cancellationToken);
@@ -1008,10 +1008,10 @@ public partial class MainWindow : Window
 
             if (!session.MediaPlayer.Play())
             {
-                throw new InvalidOperationException("The player did not start the video.");
+                throw new InvalidOperationException("播放器未能启动视频。");
             }
 
-            StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - Playing from memory";
+            StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - 正在以内存模式播放";
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1019,8 +1019,8 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             page.StopVideo();
-            StatusTextBlock.Text = "Video playback failed";
-            MessageBox.Show(this, ex.Message, "Cannot play video", MessageBoxButton.OK, MessageBoxImage.Error);
+            StatusTextBlock.Text = "视频播放失败";
+            MessageBox.Show(this, ex.Message, "无法播放视频", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -1227,7 +1227,7 @@ public partial class MainWindow : Window
             if (page.PlaybackSession == session)
             {
                 page.IsVideoPaused = false;
-                StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - Playing";
+                StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - 正在播放";
             }
         }));
 
@@ -1236,7 +1236,7 @@ public partial class MainWindow : Window
             if (page.PlaybackSession == session)
             {
                 page.IsVideoPaused = true;
-                StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - Paused";
+                StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - 已暂停";
             }
         }));
 
@@ -1272,8 +1272,8 @@ public partial class MainWindow : Window
             }
 
             page.StopVideo();
-            StatusTextBlock.Text = "Video playback failed";
-            MessageBox.Show(this, "The player cannot play this video.", "Video playback failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            StatusTextBlock.Text = "视频播放失败";
+            MessageBox.Show(this, "播放器无法播放该视频。", "视频播放失败", MessageBoxButton.OK, MessageBoxImage.Error);
         }));
     }
 
@@ -1632,7 +1632,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        StatusTextBlock.Text = $"{Path.GetFileName(_archivePath)} - 缂?{currentPageIndex + 1}/{Pages.Count} 濠碉紕鍋戦崐妤呫€傞鐐潟婵犻潧妫崯鍛存煠閼规澘鐓愮紒浣峰嵆閺?{GetLoadedRangeText()}";
+        StatusTextBlock.Text = $"{Path.GetFileName(_archivePath)} - 第 {currentPageIndex + 1}/{Pages.Count} 页，已加载 {GetLoadedRangeText()}";
     }
 
     private string GetLoadedRangeText()
@@ -1663,8 +1663,8 @@ public partial class MainWindow : Window
         _passwordPrompt?.TrySetResult(null);
         _passwordPrompt = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
         PasswordPromptTextBlock.Text = knownPasswordsTried
-            ? "Known passwords did not work. Enter the correct password"
-            : "Enter archive password";
+            ? "历史密码均不可用，请输入正确密码"
+            : "输入压缩包密码";
         PasswordArchiveNameTextBlock.Text = Path.GetFileName(archivePath);
         ArchivePasswordBox.Clear();
         PasswordOpenButton.IsEnabled = false;
@@ -1934,7 +1934,7 @@ public partial class MainWindow : Window
             {
                 ThrowIfDisposed();
                 var entry = _entries.FirstOrDefault(entry => string.Equals(entry.Key, entryKey, StringComparison.Ordinal))
-                    ?? throw new FileNotFoundException("Entry not found in archive.", entryKey);
+                    ?? throw new FileNotFoundException("压缩包中找不到该条目。", entryKey);
 
                 using var source = entry.OpenEntryStream();
                 var destination = entry.Size is > 0 and <= int.MaxValue
@@ -2116,11 +2116,11 @@ public sealed class ComicPage : INotifyPropertyChanged
         : !IsVideoPlaying
             ? _coverLoadStatus switch
             {
-                VideoCoverLoadStatus.Oversized => "Video too large; click to load and play",
-                VideoCoverLoadStatus.Loading => "Loading cover...",
-                VideoCoverLoadStatus.Failed => "Cover failed; click to play",
-                VideoCoverLoadStatus.Success => "Click to play",
-                _ => "Waiting for cover..."
+                VideoCoverLoadStatus.Oversized => "视频过大，点击加载并播放",
+                VideoCoverLoadStatus.Loading => "正在加载封面...",
+                VideoCoverLoadStatus.Failed => "封面加载失败，点击播放",
+                VideoCoverLoadStatus.Success => "点击播放",
+                _ => "等待加载封面..."
             }
             : VideoTimeText;
 
