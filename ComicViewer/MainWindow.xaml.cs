@@ -10,6 +10,7 @@ using System.Runtime;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Threading.Channels;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -24,12 +25,13 @@ namespace ComicViewer;
 public partial class MainWindow : Window
 {
     private const int MinimumDecodePixelWidth = 480;
-    private const int MediaLoadParallelism = 2;
     private const long MaxMediaCacheBytes = 512L * 1024 * 1024;
+    private const long MaxDecodedImageBytes = 256L * 1024 * 1024;
     private const long MaxInMemoryVideoPlaybackBytes = MaxMediaCacheBytes;
     private const double MouseWheelScrollMultiplier = 5d;
     private const double MouseWheelPixelsPerLine = 16d;
     private static readonly TimeSpan CoverFrameTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan ImageDecodeDebounceDelay = TimeSpan.FromMilliseconds(60);
 
     private static readonly HashSet<string> ImageExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -56,15 +58,20 @@ public partial class MainWindow : Window
 
     private readonly object _cacheLock = new();
     private readonly Dictionary<string, CachedMedia> _mediaCache = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _loadsInFlight = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _decodesInFlight = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _mediaReadsInFlight = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _videoCoverLoadsInFlight = new(StringComparer.Ordinal);
     private readonly HashSet<string> _failedMedia = new(StringComparer.Ordinal);
     private readonly LibVLC _libVlc;
+    private readonly System.Windows.Threading.DispatcherTimer _imageDecodeTimer = new()
+    {
+        Interval = ImageDecodeDebounceDelay
+    };
 
     private ArchiveSession? _archiveSession;
-    private CancellationTokenSource? _mediaLoadCts;
+    private Channel<MediaReadRequest>? _mediaReadChannel;
+    private CancellationTokenSource? _mediaReadCts;
     private CancellationTokenSource? _videoPlayCts;
-    private Task? _mediaLoadTask;
+    private Task? _mediaReadTask;
     private TaskCompletionSource<string?>? _passwordPrompt;
     private ScrollViewer? _pagesScrollViewer;
     private string? _archivePath;
@@ -72,7 +79,6 @@ public partial class MainWindow : Window
     private int _cacheGeneration;
     private int _currentPageIndex;
     private long _cacheBytes;
-    private long _reservedCacheBytes;
     private DateTime _lastCacheTrimUtc = DateTime.MinValue;
     private bool _isLoadingArchive;
 
@@ -87,12 +93,13 @@ public partial class MainWindow : Window
 
         InitializeComponent();
         DataContext = this;
+        _imageDecodeTimer.Tick += ImageDecodeTimer_Tick;
         LoadPasswordHistory();
 
         Loaded += MainWindow_Loaded;
         Closed += (_, _) =>
         {
-            StopMediaLoader();
+            StopArchiveReader();
             CancelVideoPlayLoad();
             StopAllVideos();
             DisposeArchiveSession();
@@ -116,8 +123,8 @@ public partial class MainWindow : Window
     {
         var dialog = new OpenFileDialog
         {
-            Title = "选择漫画压缩包",
-            Filter = "漫画压缩包 (*.zip;*.rar)|*.zip;*.rar|ZIP 文件 (*.zip)|*.zip|RAR 文件 (*.rar)|*.rar|所有文件 (*.*)|*.*",
+            Title = "Open comic archive",
+            Filter = "Comic archives (*.zip;*.rar)|*.zip;*.rar|ZIP files (*.zip)|*.zip|RAR files (*.rar)|*.rar|All files (*.*)|*.*",
             CheckFileExists = true
         };
 
@@ -225,7 +232,7 @@ public partial class MainWindow : Window
                 password = await ShowPasswordOverlayAsync(archivePath, hasTriedAnyKnownPassword);
                 if (password is null)
                 {
-                    StatusTextBlock.Text = "已取消打开压缩包";
+                    StatusTextBlock.Text = "Open archive canceled";
                     return;
                 }
             }
@@ -255,7 +262,7 @@ public partial class MainWindow : Window
     private async Task<string?> TryKnownPasswordsAsync(string archivePath, IReadOnlyList<string> knownPasswords)
     {
         _isLoadingArchive = true;
-        SetLoadingState(true, $"正在尝试 {knownPasswords.Count} 个已知密码 ...");
+        SetLoadingState(true, $"婵犳鍠楃换鎰緤閽樺鑰挎い蹇撴閻掑﹥绻濋棃娑冲姛婵?{knownPasswords.Count} 濠电偞鍨堕幖鈺傜濠婂牆绀勯柨鐔哄У閸庢鏌曟径鍫濆姢婵″弶娲熼弻?...");
 
         var nextPasswordIndex = -1;
         var hasResult = 0;
@@ -333,7 +340,7 @@ public partial class MainWindow : Window
     private async Task LoadArchiveAsync(string archivePath, string? password)
     {
         _isLoadingArchive = true;
-        SetLoadingState(true, $"正在读取目录 {Path.GetFileName(archivePath)} ...");
+        SetLoadingState(true, $"婵犳鍠楃换鎰緤閽樺鑰挎い蹇撴鐎氭岸鎮归崶銊ョ祷缂佹彃娼￠弻锝夊煛婵犲倹鐏堢紓?{Path.GetFileName(archivePath)} ...");
         ResetReader();
         UpdatePageWidth();
 
@@ -359,27 +366,27 @@ public partial class MainWindow : Window
         GetPagesScrollViewer()?.ScrollToTop();
         if (Pages.Count == 0)
         {
-            StatusTextBlock.Text = "压缩包中没有找到支持的图片或视频文件";
+            StatusTextBlock.Text = "No supported images or videos found in the archive";
             return;
         }
 
         RememberPassword(password);
         UpdatePageWidth();
         UpdateReadingStatus(0);
-        StartMediaLoading(0);
+        StartArchiveReader();
         RefreshDecodedImages();
     }
 
     private void ShowOpenArchiveError(Exception exception)
     {
-        StatusTextBlock.Text = "打开失败";
-        MessageBox.Show(this, exception.Message, "无法打开压缩包", MessageBoxButton.OK, MessageBoxImage.Error);
+        StatusTextBlock.Text = "Open failed";
+        MessageBox.Show(this, exception.Message, "Cannot open archive", MessageBoxButton.OK, MessageBoxImage.Error);
     }
 
     private void ResetReader()
     {
         _archivePath = null;
-        StopMediaLoader();
+        StopArchiveReader();
         CancelVideoPlayLoad();
         StopAllVideos();
         DisposeArchiveSession();
@@ -422,234 +429,167 @@ public partial class MainWindow : Window
         }
     }
 
-    private void StartMediaLoading(int currentPageIndex)
+    private void StartArchiveReader()
+    {
+        StopArchiveReader();
+        if (_archiveSession is null)
+        {
+            return;
+        }
+
+        _mediaReadCts = new CancellationTokenSource();
+        _mediaReadChannel = Channel.CreateUnbounded<MediaReadRequest>(new UnboundedChannelOptions
+        {
+            SingleReader = true,
+            SingleWriter = false
+        });
+
+        var generation = _cacheGeneration;
+        _mediaReadTask = Task.Run(() => RunArchiveReaderAsync(_mediaReadChannel.Reader, generation, _mediaReadCts.Token));
+    }
+
+    private void StopArchiveReader()
+    {
+        var channel = _mediaReadChannel;
+        var cts = _mediaReadCts;
+        _mediaReadChannel = null;
+        _mediaReadCts = null;
+        _mediaReadTask = null;
+        _imageDecodeTimer.Stop();
+        channel?.Writer.TryComplete();
+        cts?.Cancel();
+
+        lock (_cacheLock)
+        {
+            _mediaReadsInFlight.Clear();
+        }
+    }
+
+    private async Task RunArchiveReaderAsync(
+        ChannelReader<MediaReadRequest> reader,
+        int generation,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (var request in reader.ReadAllAsync(cancellationToken))
+            {
+                try
+                {
+                    var session = _archiveSession;
+                    if (session is null)
+                    {
+                        continue;
+                    }
+
+                    using var mediaStream = session.CopyEntryToMemory(request.EntryKey, cancellationToken);
+                    var data = TakeMemorySegment(mediaStream);
+                    await Dispatcher.InvokeAsync(
+                        () => AcceptMediaBytes(request, data, generation),
+                        System.Windows.Threading.DispatcherPriority.Background,
+                        cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    await Dispatcher.InvokeAsync(
+                        () => FinishFailedRead(request, generation, ex),
+                        System.Windows.Threading.DispatcherPriority.Background);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+    }
+
+    private void RequestMediaForVisiblePages()
     {
         if (_archiveSession is null || Pages.Count == 0)
         {
             return;
         }
 
-        _currentPageIndex = Math.Clamp(currentPageIndex, 0, Pages.Count - 1);
+        foreach (var index in GetMediaRequestIndexes())
+        {
+            var page = Pages[index];
+            if (TryApplyCachedMedia(page))
+            {
+                continue;
+            }
 
+            RequestMediaRead(page);
+        }
+    }
+
+    private IEnumerable<int> GetMediaRequestIndexes()
+    {
+        var indexes = GetDecodedImageIndexes();
+        AddPageIndex(indexes, _currentPageIndex - 2);
+        AddPageIndex(indexes, _currentPageIndex + 2);
+        return indexes.OrderBy(index => GetReadingDistance(index, _currentPageIndex));
+    }
+
+    private void RequestMediaRead(ComicPage page)
+    {
+        Channel<MediaReadRequest>? channel;
         lock (_cacheLock)
         {
-            if (_mediaLoadTask is { IsCompleted: false })
+            if (_mediaCache.ContainsKey(page.EntryKey)
+                || _mediaReadsInFlight.Contains(page.EntryKey)
+                || _failedMedia.Contains(page.EntryKey))
             {
                 return;
             }
 
-            _mediaLoadCts = new CancellationTokenSource();
-            var generation = _cacheGeneration;
-            _mediaLoadTask = Task.Run(() => LoadMediaUntilCacheIsFullAsync(generation, _mediaLoadCts));
-        }
-    }
-
-    private async Task LoadMediaUntilCacheIsFullAsync(int generation, CancellationTokenSource loadCts)
-    {
-        var cancellationToken = loadCts.Token;
-        try
-        {
-            using var parallelGate = new SemaphoreSlim(MediaLoadParallelism);
-            var workers = new List<Task>();
-
-            while (!cancellationToken.IsCancellationRequested)
+            if (page.IsVideo && page.EntrySize > MaxMediaCacheBytes)
             {
-                var request = await Dispatcher.InvokeAsync(
-                    () => CreateNextMediaRequest(generation),
-                    System.Windows.Threading.DispatcherPriority.Background);
-
-                if (request is null)
-                {
-                    break;
-                }
-
-                await parallelGate.WaitAsync(cancellationToken);
-                workers.Add(Task.Run(async () =>
-                {
-                    try
-                    {
-                        await LoadOneMediaAsync(request, generation, cancellationToken);
-                    }
-                    finally
-                    {
-                        parallelGate.Release();
-                    }
-                }, cancellationToken));
-
-                workers.RemoveAll(task => task.IsCompleted);
+                page.SetCoverLoadStatus(VideoCoverLoadStatus.Oversized);
+                _failedMedia.Add(page.EntryKey);
+                return;
             }
 
-            await Task.WhenAll(workers);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-        }
-        finally
-        {
-            await Dispatcher.InvokeAsync(() =>
-            {
-                lock (_cacheLock)
-                {
-                    if (ReferenceEquals(_mediaLoadCts, loadCts))
-                    {
-                        _mediaLoadCts = null;
-                        _mediaLoadTask = null;
-                    }
-                }
-
-                loadCts.Dispose();
-            }, System.Windows.Threading.DispatcherPriority.Background);
-        }
-    }
-
-    private async Task LoadOneMediaAsync(MediaLoadRequest request, int generation, CancellationToken cancellationToken)
-    {
-        try
-        {
-            var session = _archiveSession;
-            if (session is null)
+            channel = _mediaReadChannel;
+            if (channel is null)
             {
                 return;
             }
 
-            if (request.Type == ComicMediaType.Image)
+            _mediaReadsInFlight.Add(page.EntryKey);
+        }
+
+        if (!channel.Writer.TryWrite(new MediaReadRequest(page.Index, page.EntryKey, page.MediaType)))
+        {
+            lock (_cacheLock)
             {
-                using var encodedImage = session.CopyEntryToMemory(request.EntryKey, cancellationToken);
-                var imageData = TakeMemorySegment(encodedImage);
-                await Dispatcher.InvokeAsync(
-                    () => AcceptImage(request, imageData, generation),
-                    System.Windows.Threading.DispatcherPriority.Background);
-                return;
+                _mediaReadsInFlight.Remove(page.EntryKey);
             }
-
-            await Dispatcher.InvokeAsync(
-                () =>
-                {
-                    if (IsFreshRequest(request, generation))
-                    {
-                        request.Page.SetCoverLoadStatus(VideoCoverLoadStatus.Loading);
-                    }
-                },
-                System.Windows.Threading.DispatcherPriority.Background);
-
-            using var encodedMedia = session.CopyEntryToMemory(request.EntryKey, cancellationToken);
-            var videoData = TakeMemorySegment(encodedMedia);
-            var coverFrame = await TryRenderVideoCoverFrameAsync(
-                request.Page,
-                CreateReadOnlyMemoryStream(videoData),
-                cancellationToken);
-            await Dispatcher.InvokeAsync(
-                () => AcceptVideo(request, videoData, coverFrame, generation),
-                System.Windows.Threading.DispatcherPriority.Background);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-        }
-        catch (Exception ex)
-        {
-            await Dispatcher.InvokeAsync(() =>
-            {
-                if (!IsFreshRequest(request, generation))
-                {
-                    FinishStaleRequest(request);
-                    return;
-                }
-
-                FinishFailedRequest(request);
-                StatusTextBlock.Text = $"{(request.Type == ComicMediaType.Image ? "图片" : "视频")}加载失败: {Path.GetFileName(request.EntryKey)} - {ex.Message}";
-            }, System.Windows.Threading.DispatcherPriority.Background);
         }
     }
 
-    private MediaLoadRequest? CreateNextMediaRequest(int generation)
-    {
-        if (generation != _cacheGeneration || Pages.Count == 0)
-        {
-            return null;
-        }
-
-        var visiblePages = GetRealizedPageIndexes();
-        lock (_cacheLock)
-        {
-            if (generation != _cacheGeneration)
-            {
-                return null;
-            }
-
-            foreach (var index in EnumeratePagesFrom(_currentPageIndex))
-            {
-                var page = Pages[index];
-                if (_mediaCache.TryGetValue(page.EntryKey, out var cachedMedia))
-                {
-                    ApplyCachedMedia(page, cachedMedia);
-                    continue;
-                }
-
-                if (_loadsInFlight.Contains(page.EntryKey) || _failedMedia.Contains(page.EntryKey))
-                {
-                    continue;
-                }
-
-                var isVisibleOrCurrent = index == _currentPageIndex || visiblePages.Contains(index);
-                var reservedBytes = EstimateReservation(page);
-                if (page.IsVideo && reservedBytes > MaxMediaCacheBytes)
-                {
-                    page.SetCoverLoadStatus(VideoCoverLoadStatus.Oversized);
-                    _failedMedia.Add(page.EntryKey);
-                    continue;
-                }
-
-                if (_cacheBytes + _reservedCacheBytes >= MaxMediaCacheBytes && !isVisibleOrCurrent)
-                {
-                    return null;
-                }
-
-                _loadsInFlight.Add(page.EntryKey);
-                _reservedCacheBytes += reservedBytes;
-                return new MediaLoadRequest(index, page, page.EntryKey, page.MediaType, reservedBytes);
-            }
-        }
-
-        return null;
-    }
-
-    private void AcceptImage(MediaLoadRequest request, ArraySegment<byte> imageData, int generation)
+    private void AcceptMediaBytes(MediaReadRequest request, ArraySegment<byte> data, int generation)
     {
         if (!IsFreshRequest(request, generation))
         {
-            FinishStaleRequest(request);
+            FinishStaleRead(request);
             return;
         }
 
-        var page = Pages[request.PageIndex];
-        StoreCachedMedia(new CachedMedia(request.EntryKey, request.PageIndex, request.Type, imageData, null, null, imageData.Count), request);
-        page.SetEncodedImageData(imageData);
-        DecodeVisibleImages();
+        var media = request.Type == ComicMediaType.Image
+            ? new CachedMedia(request.EntryKey, request.PageIndex, request.Type, data, null, null, data.Count)
+            : new CachedMedia(request.EntryKey, request.PageIndex, request.Type, null, data, null, data.Count);
+
+        StoreCachedMedia(media);
+        ApplyCachedMedia(Pages[request.PageIndex], media);
         EvictMediaOverBudget();
+        ProcessAvailableVisibleMedia();
         UpdateReadingStatus(GetCurrentPageIndex());
     }
 
-    private void AcceptVideo(MediaLoadRequest request, ArraySegment<byte> videoData, ImageSource? coverFrame, int generation)
-    {
-        if (!IsFreshRequest(request, generation))
-        {
-            FinishStaleRequest(request);
-            return;
-        }
-
-        var page = Pages[request.PageIndex];
-        StoreCachedMedia(new CachedMedia(request.EntryKey, request.PageIndex, request.Type, null, videoData, coverFrame, videoData.Count), request);
-        if (coverFrame is not null && !page.IsVideoPlaying)
-        {
-            page.SetVideoFrame(coverFrame);
-        }
-
-        page.SetCoverLoadStatus(coverFrame is null ? VideoCoverLoadStatus.Failed : VideoCoverLoadStatus.Success);
-        EvictMediaOverBudget();
-        UpdateReadingStatus(GetCurrentPageIndex());
-    }
-
-    private bool IsFreshRequest(MediaLoadRequest request, int generation)
+    private bool IsFreshRequest(MediaReadRequest request, int generation)
     {
         return generation == _cacheGeneration
             && request.PageIndex >= 0
@@ -657,39 +597,61 @@ public partial class MainWindow : Window
             && string.Equals(Pages[request.PageIndex].EntryKey, request.EntryKey, StringComparison.Ordinal);
     }
 
-    private void StoreCachedMedia(CachedMedia media, MediaLoadRequest request)
+    private void StoreCachedMedia(CachedMedia media)
     {
         lock (_cacheLock)
         {
-            _loadsInFlight.Remove(request.EntryKey);
-            _reservedCacheBytes = Math.Max(0, _reservedCacheBytes - request.ReservedBytes);
-            if (_mediaCache.Remove(request.EntryKey, out var oldMedia))
+            _mediaReadsInFlight.Remove(media.EntryKey);
+            if (_mediaCache.Remove(media.EntryKey, out var oldMedia))
             {
                 _cacheBytes -= oldMedia.EstimatedBytes;
             }
 
-            _mediaCache[request.EntryKey] = media;
+            _mediaCache[media.EntryKey] = media;
             _cacheBytes += media.EstimatedBytes;
         }
     }
 
-    private void FinishFailedRequest(MediaLoadRequest request)
+    private void FinishFailedRead(MediaReadRequest request, int generation, Exception exception)
+    {
+        if (!IsFreshRequest(request, generation))
+        {
+            FinishStaleRead(request);
+            return;
+        }
+
+        lock (_cacheLock)
+        {
+            _mediaReadsInFlight.Remove(request.EntryKey);
+            _failedMedia.Add(request.EntryKey);
+        }
+
+        StatusTextBlock.Text = $"{(request.Type == ComicMediaType.Image ? "Image" : "Video")} load failed: {Path.GetFileName(request.EntryKey)} - {exception.Message}";
+    }
+
+    private void FinishStaleRead(MediaReadRequest request)
     {
         lock (_cacheLock)
         {
-            _loadsInFlight.Remove(request.EntryKey);
-            _reservedCacheBytes = Math.Max(0, _reservedCacheBytes - request.ReservedBytes);
-            _failedMedia.Add(request.EntryKey);
+            _mediaReadsInFlight.Remove(request.EntryKey);
         }
     }
 
-    private void FinishStaleRequest(MediaLoadRequest request)
+    private bool TryApplyCachedMedia(ComicPage page)
     {
+        CachedMedia? media;
         lock (_cacheLock)
         {
-            _loadsInFlight.Remove(request.EntryKey);
-            _reservedCacheBytes = Math.Max(0, _reservedCacheBytes - request.ReservedBytes);
+            _mediaCache.TryGetValue(page.EntryKey, out media);
         }
+
+        if (media is null)
+        {
+            return false;
+        }
+
+        ApplyCachedMedia(page, media);
+        return true;
     }
 
     private void EvictMediaOverBudget()
@@ -802,11 +764,10 @@ public partial class MainWindow : Window
         lock (_cacheLock)
         {
             _mediaCache.Clear();
-            _loadsInFlight.Clear();
-            _decodesInFlight.Clear();
+            _mediaReadsInFlight.Clear();
+            _videoCoverLoadsInFlight.Clear();
             _failedMedia.Clear();
             _cacheBytes = 0;
-            _reservedCacheBytes = 0;
             _cacheGeneration++;
         }
 
@@ -825,35 +786,9 @@ public partial class MainWindow : Window
         }
     }
 
-    private void StopMediaLoader()
-    {
-        CancellationTokenSource? cts;
-        lock (_cacheLock)
-        {
-            cts = _mediaLoadCts;
-            _mediaLoadCts = null;
-            _mediaLoadTask = null;
-            _loadsInFlight.Clear();
-            _decodesInFlight.Clear();
-            _reservedCacheBytes = 0;
-        }
-
-        cts?.Cancel();
-    }
-
-    private long EstimateReservation(ComicPage page)
-    {
-        if (page.IsVideo)
-        {
-            return page.EntrySize > 0 ? page.EntrySize : MaxMediaCacheBytes / 4;
-        }
-
-        return page.EntrySize > 0 ? page.EntrySize : 2L * 1024 * 1024;
-    }
-
     private HashSet<int> GetDecodedImageIndexes()
     {
-        var indexes = GetRealizedPageIndexes();
+        var indexes = GetVisiblePageIndexes(includeAdjacentPages: true);
         if (indexes.Count == 0 && Pages.Count > 0)
         {
             indexes.Add(_currentPageIndex);
@@ -876,7 +811,24 @@ public partial class MainWindow : Window
     private void RefreshDecodedImages()
     {
         ReleaseDecodedImagesOutsideRange();
-        DecodeVisibleImages();
+        EnforceDecodedImageBudget(GetDecodedImageIndexes());
+        RequestMediaForVisiblePages();
+        ProcessAvailableVisibleMedia();
+    }
+
+    private void ScheduleRefreshDecodedImages()
+    {
+        ReleaseDecodedImagesOutsideRange();
+        EnforceDecodedImageBudget(GetDecodedImageIndexes());
+        RequestMediaForVisiblePages();
+        _imageDecodeTimer.Stop();
+        _imageDecodeTimer.Start();
+    }
+
+    private void ImageDecodeTimer_Tick(object? sender, EventArgs e)
+    {
+        _imageDecodeTimer.Stop();
+        ProcessAvailableVisibleMedia();
     }
 
     private void ReleaseDecodedImagesOutsideRange()
@@ -888,59 +840,67 @@ public partial class MainWindow : Window
         }
     }
 
-    private void DecodeVisibleImages()
+    private void ProcessAvailableVisibleMedia()
     {
         var decodePixelWidth = GetDecodePixelWidth();
-        foreach (var page in GetDecodedImageIndexes().Select(index => Pages[index]).Where(page => page.IsImage && page.Image is null && page.EncodedImageData is not null))
+        foreach (var index in GetDecodedImageIndexes().OrderBy(index => GetReadingDistance(index, _currentPageIndex)))
         {
-            lock (_cacheLock)
+            var page = Pages[index];
+            if (page.IsImage)
             {
-                if (!_decodesInFlight.Add(page.EntryKey))
+                if (page.EncodedImageData is null)
                 {
+                    RequestMediaRead(page);
                     continue;
                 }
+
+                if (page.Image is null)
+                {
+                    using var stream = CreateReadOnlyMemoryStream(page.EncodedImageData.Value);
+                    page.SetImage(DecodeImage(stream, decodePixelWidth), _pageWidth);
+                    EnforceDecodedImageBudget(GetDecodedImageIndexes());
+                }
+
+                continue;
             }
 
-            var generation = _cacheGeneration;
-            var encodedImageData = page.EncodedImageData!.Value;
-            _ = Task.Run(() =>
+            if (page.IsVideo)
             {
-                try
-                {
-                    using var stream = CreateReadOnlyMemoryStream(encodedImageData);
-                    var image = DecodeImage(stream, decodePixelWidth);
-                    Dispatcher.BeginInvoke((Action)(() =>
-                    {
-                        lock (_cacheLock)
-                        {
-                            _decodesInFlight.Remove(page.EntryKey);
-                        }
-
-                        if (generation == _cacheGeneration
-                            && decodePixelWidth == GetDecodePixelWidth()
-                            && page.EncodedImageDataEquals(encodedImageData)
-                            && GetDecodedImageIndexes().Contains(page.Index))
-                        {
-                            page.SetImage(image, _pageWidth);
-                        }
-                        else
-                        {
-                            DecodeVisibleImages();
-                        }
-                    }), System.Windows.Threading.DispatcherPriority.Background);
-                }
-                catch
-                {
-                    Dispatcher.BeginInvoke((Action)(() =>
-                    {
-                        lock (_cacheLock)
-                        {
-                            _decodesInFlight.Remove(page.EntryKey);
-                        }
-                    }), System.Windows.Threading.DispatcherPriority.Background);
-                }
-            });
+                EnsureVideoCoverFromCache(page);
+            }
         }
+    }
+
+    private void EnforceDecodedImageBudget(HashSet<int> protectedIndexes)
+    {
+        var decodedBytes = GetDecodedImageBytes();
+        while (decodedBytes > MaxDecodedImageBytes)
+        {
+            var page = Pages
+                .Where(page => page.IsImage && page.Image is not null && !protectedIndexes.Contains(page.Index))
+                .OrderByDescending(page => Math.Abs(page.Index - _currentPageIndex))
+                .FirstOrDefault();
+            if (page?.Image is null)
+            {
+                return;
+            }
+
+            decodedBytes -= EstimateDecodedImageBytes(page.Image);
+            page.ClearImage(_pageWidth);
+        }
+    }
+
+    private long GetDecodedImageBytes()
+    {
+        return Pages
+            .Where(page => page.Image is not null)
+            .Sum(page => EstimateDecodedImageBytes(page.Image!));
+    }
+
+    private static long EstimateDecodedImageBytes(BitmapSource image)
+    {
+        var bitsPerPixel = image.Format.BitsPerPixel > 0 ? image.Format.BitsPerPixel : 32;
+        return (long)image.PixelWidth * image.PixelHeight * Math.Max(1, bitsPerPixel / 8);
     }
 
     private static BitmapImage DecodeImage(Stream encodedStream, int decodePixelWidth)
@@ -1006,11 +966,11 @@ public partial class MainWindow : Window
         using var cachedPlaybackProbe = TryCreateCachedVideoStream(page.EntryKey);
         if (page.EntrySize > MaxInMemoryVideoPlaybackBytes && cachedPlaybackProbe is null)
         {
-            StatusTextBlock.Text = $"视频过大，已阻止整段读入内存: {Path.GetFileName(page.EntryKey)}";
+            StatusTextBlock.Text = $"Video is too large to load into memory: {Path.GetFileName(page.EntryKey)}";
             MessageBox.Show(
                 this,
-                $"这个视频大小为 {FormatByteSize(page.EntrySize)}，超过当前内存播放上限 {FormatByteSize(MaxInMemoryVideoPlaybackBytes)}。\n\n为避免卡死或内存耗尽，程序不会把它整段读入内存，也不会写临时文件。",
-                "视频过大",
+                $"This video is {FormatByteSize(page.EntrySize)}, which exceeds the in-memory playback limit {FormatByteSize(MaxInMemoryVideoPlaybackBytes)}.\\n\\nTo avoid freezes or memory exhaustion, it will not be loaded fully into memory or written to a temp file.",
+                "Video too large",
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
             return;
@@ -1026,7 +986,7 @@ public partial class MainWindow : Window
         {
             StopOtherVideos(page);
             page.StopVideo();
-            StatusTextBlock.Text = $"正在准备播放 {Path.GetFileName(page.EntryKey)} ...";
+            StatusTextBlock.Text = $"Preparing video {Path.GetFileName(page.EntryKey)} ...";
 
             videoStream = TryCreateCachedVideoStream(page.EntryKey)
                 ?? await Task.Run(() => _archiveSession?.CopyEntryToMemory(page.EntryKey, cancellationToken), cancellationToken);
@@ -1048,10 +1008,10 @@ public partial class MainWindow : Window
 
             if (!session.MediaPlayer.Play())
             {
-                throw new InvalidOperationException("播放器没有成功启动视频。");
+                throw new InvalidOperationException("The player did not start the video.");
             }
 
-            StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - 使用内存播放";
+            StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - Playing from memory";
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1059,8 +1019,8 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             page.StopVideo();
-            StatusTextBlock.Text = "视频播放失败";
-            MessageBox.Show(this, ex.Message, "无法播放视频", MessageBoxButton.OK, MessageBoxImage.Error);
+            StatusTextBlock.Text = "Video playback failed";
+            MessageBox.Show(this, ex.Message, "Cannot play video", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -1105,6 +1065,76 @@ public partial class MainWindow : Window
         return data.Array is null
             ? new MemoryStream(Array.Empty<byte>(), writable: false)
             : new MemoryStream(data.Array, data.Offset, data.Count, writable: false);
+    }
+
+    private void EnsureVideoCoverFromCache(ComicPage page)
+    {
+        if (!page.IsVideo || page.VideoFrame is not null || page.IsVideoPlaying)
+        {
+            return;
+        }
+
+        ArraySegment<byte>? videoData = null;
+        lock (_cacheLock)
+        {
+            if (_videoCoverLoadsInFlight.Contains(page.EntryKey))
+            {
+                return;
+            }
+
+            if (_mediaCache.TryGetValue(page.EntryKey, out var media) && media.VideoData is { } cachedVideoData)
+            {
+                videoData = cachedVideoData;
+                _videoCoverLoadsInFlight.Add(page.EntryKey);
+            }
+        }
+
+        if (videoData is null)
+        {
+            RequestMediaRead(page);
+            return;
+        }
+
+        page.SetCoverLoadStatus(VideoCoverLoadStatus.Loading);
+        _ = LoadVideoCoverFromCachedBytesAsync(page, videoData.Value);
+    }
+
+    private async Task LoadVideoCoverFromCachedBytesAsync(ComicPage page, ArraySegment<byte> videoData)
+    {
+        ImageSource? coverFrame = null;
+        try
+        {
+            coverFrame = await TryRenderVideoCoverFrameAsync(page, CreateReadOnlyMemoryStream(videoData), CancellationToken.None);
+            if (coverFrame is not null && !page.IsVideoPlaying)
+            {
+                page.SetVideoFrame(coverFrame);
+                StoreVideoCoverFrame(page, coverFrame);
+            }
+
+            page.SetCoverLoadStatus(coverFrame is null ? VideoCoverLoadStatus.Failed : VideoCoverLoadStatus.Success);
+        }
+        catch
+        {
+            page.SetCoverLoadStatus(VideoCoverLoadStatus.Failed);
+        }
+        finally
+        {
+            lock (_cacheLock)
+            {
+                _videoCoverLoadsInFlight.Remove(page.EntryKey);
+            }
+        }
+    }
+
+    private void StoreVideoCoverFrame(ComicPage page, ImageSource coverFrame)
+    {
+        lock (_cacheLock)
+        {
+            if (_mediaCache.TryGetValue(page.EntryKey, out var media) && media.Type == ComicMediaType.Video)
+            {
+                _mediaCache[page.EntryKey] = media with { VideoFrame = coverFrame };
+            }
+        }
     }
 
     private async Task<ImageSource?> TryRenderVideoCoverFrameAsync(
@@ -1197,7 +1227,7 @@ public partial class MainWindow : Window
             if (page.PlaybackSession == session)
             {
                 page.IsVideoPaused = false;
-                StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - 正在播放";
+                StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - Playing";
             }
         }));
 
@@ -1206,7 +1236,7 @@ public partial class MainWindow : Window
             if (page.PlaybackSession == session)
             {
                 page.IsVideoPaused = true;
-                StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - 已暂停";
+                StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - Paused";
             }
         }));
 
@@ -1242,8 +1272,8 @@ public partial class MainWindow : Window
             }
 
             page.StopVideo();
-            StatusTextBlock.Text = "视频播放失败";
-            MessageBox.Show(this, "播放器无法播放这个视频。", "视频播放失败", MessageBoxButton.OK, MessageBoxImage.Error);
+            StatusTextBlock.Text = "Video playback failed";
+            MessageBox.Show(this, "The player cannot play this video.", "Video playback failed", MessageBoxButton.OK, MessageBoxImage.Error);
         }));
     }
 
@@ -1316,8 +1346,7 @@ public partial class MainWindow : Window
         var currentPageIndex = GetCurrentPageIndex();
         _currentPageIndex = currentPageIndex;
         UpdateReadingStatus(currentPageIndex);
-        StartMediaLoading(currentPageIndex);
-        RefreshDecodedImages();
+        ScheduleRefreshDecodedImages();
     }
 
     private void ImageScrollViewer_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
@@ -1353,8 +1382,7 @@ public partial class MainWindow : Window
         if (Pages.Count > 0)
         {
             ClearDecodedImagesForWiderDecode(previousDecodePixelWidth, GetDecodePixelWidth());
-            StartMediaLoading(GetCurrentPageIndex());
-            RefreshDecodedImages();
+            ScheduleRefreshDecodedImages();
         }
     }
 
@@ -1426,15 +1454,35 @@ public partial class MainWindow : Window
             return;
         }
 
-        PagesListBox.ScrollIntoView(Pages[pageIndex]);
+        _currentPageIndex = pageIndex;
+        var scrollViewer = GetPagesScrollViewer();
+        if (scrollViewer is not null)
+        {
+            scrollViewer.ScrollToVerticalOffset(GetPageTopOffset(pageIndex));
+        }
+        else
+        {
+            PagesListBox.ScrollIntoView(Pages[pageIndex]);
+        }
+
         Dispatcher.BeginInvoke((Action)(() =>
         {
             AlignRealizedPageToTop(pageIndex);
             _currentPageIndex = pageIndex;
             UpdateReadingStatus(pageIndex);
-            StartMediaLoading(pageIndex);
             RefreshDecodedImages();
         }), System.Windows.Threading.DispatcherPriority.Loaded);
+    }
+
+    private double GetPageTopOffset(int pageIndex)
+    {
+        var offset = 0d;
+        for (var i = 0; i < pageIndex && i < Pages.Count; i++)
+        {
+            offset += Math.Max(1, Pages[i].DisplayHeight);
+        }
+
+        return offset;
     }
 
     private void AlignRealizedPageToTop(int pageIndex)
@@ -1506,19 +1554,62 @@ public partial class MainWindow : Window
         return bestIndex >= 0 ? bestIndex : null;
     }
 
-    private HashSet<int> GetRealizedPageIndexes()
+    private HashSet<int> GetVisiblePageIndexes(bool includeAdjacentPages)
     {
         var indexes = new HashSet<int>();
+        var scrollViewer = GetPagesScrollViewer();
+        if (scrollViewer is null)
+        {
+            AddPageIndex(indexes, _currentPageIndex);
+            return indexes;
+        }
+
         foreach (var container in FindVisualChildren<ListBoxItem>(PagesListBox))
         {
             var index = PagesListBox.ItemContainerGenerator.IndexFromContainer(container);
-            if (index >= 0 && index < Pages.Count)
+            if (index < 0 || index >= Pages.Count || container.ActualHeight <= 0)
             {
-                indexes.Add(index);
+                continue;
+            }
+
+            Rect bounds;
+            try
+            {
+                bounds = container.TransformToAncestor(scrollViewer)
+                    .TransformBounds(new Rect(0, 0, container.ActualWidth, container.ActualHeight));
+            }
+            catch (InvalidOperationException)
+            {
+                continue;
+            }
+
+            if (bounds.Bottom <= 0 || bounds.Top >= scrollViewer.ViewportHeight)
+            {
+                continue;
+            }
+
+            AddPageIndex(indexes, index);
+            if (includeAdjacentPages)
+            {
+                AddPageIndex(indexes, index - 1);
+                AddPageIndex(indexes, index + 1);
             }
         }
 
+        if (indexes.Count == 0)
+        {
+            AddPageIndex(indexes, _currentPageIndex);
+        }
+
         return indexes;
+    }
+
+    private void AddPageIndex(HashSet<int> indexes, int index)
+    {
+        if (index >= 0 && index < Pages.Count)
+        {
+            indexes.Add(index);
+        }
     }
 
     private IEnumerable<int> EnumeratePagesFrom(int currentPageIndex)
@@ -1541,7 +1632,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        StatusTextBlock.Text = $"{Path.GetFileName(_archivePath)} - 第 {currentPageIndex + 1}/{Pages.Count} 页，已载入 {GetLoadedRangeText()}";
+        StatusTextBlock.Text = $"{Path.GetFileName(_archivePath)} - 缂?{currentPageIndex + 1}/{Pages.Count} 濠碉紕鍋戦崐妤呫€傞鐐潟婵犻潧妫崯鍛存煠閼规澘鐓愮紒浣峰嵆閺?{GetLoadedRangeText()}";
     }
 
     private string GetLoadedRangeText()
@@ -1572,8 +1663,8 @@ public partial class MainWindow : Window
         _passwordPrompt?.TrySetResult(null);
         _passwordPrompt = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
         PasswordPromptTextBlock.Text = knownPasswordsTried
-            ? "所有已知密码均无法解锁，请输入正确密码"
-            : "请输入压缩包密码";
+            ? "Known passwords did not work. Enter the correct password"
+            : "Enter archive password";
         PasswordArchiveNameTextBlock.Text = Path.GetFileName(archivePath);
         ArchivePasswordBox.Clear();
         PasswordOpenButton.IsEnabled = false;
@@ -1765,12 +1856,10 @@ public partial class MainWindow : Window
         ImageSource? VideoFrame,
         long EstimatedBytes);
 
-    private sealed record MediaLoadRequest(
+    private sealed record MediaReadRequest(
         int PageIndex,
-        ComicPage Page,
         string EntryKey,
-        ComicMediaType Type,
-        long ReservedBytes);
+        ComicMediaType Type);
 
     private sealed class ArchiveSession : IDisposable
     {
@@ -2027,11 +2116,11 @@ public sealed class ComicPage : INotifyPropertyChanged
         : !IsVideoPlaying
             ? _coverLoadStatus switch
             {
-                VideoCoverLoadStatus.Oversized => "视频过大，点击后加载播放",
-                VideoCoverLoadStatus.Loading => "正在加载封面...",
-                VideoCoverLoadStatus.Failed => "封面加载失败，点击播放",
-                VideoCoverLoadStatus.Success => "点击播放",
-                _ => "等待加载封面..."
+                VideoCoverLoadStatus.Oversized => "Video too large; click to load and play",
+                VideoCoverLoadStatus.Loading => "Loading cover...",
+                VideoCoverLoadStatus.Failed => "Cover failed; click to play",
+                VideoCoverLoadStatus.Success => "Click to play",
+                _ => "Waiting for cover..."
             }
             : VideoTimeText;
 
