@@ -59,8 +59,10 @@ public partial class MainWindow : Window
     private readonly object _cacheLock = new();
     private readonly Dictionary<string, CachedMedia> _mediaCache = new(StringComparer.Ordinal);
     private readonly HashSet<string> _mediaReadsInFlight = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _imageDecodesInFlight = new(StringComparer.Ordinal);
     private readonly HashSet<string> _videoCoverLoadsInFlight = new(StringComparer.Ordinal);
     private readonly HashSet<string> _failedMedia = new(StringComparer.Ordinal);
+    private readonly SemaphoreSlim _imageDecodeConcurrency = new(Math.Clamp(Environment.ProcessorCount / 2, 1, 4));
     private readonly LibVLC _libVlc;
     private readonly System.Windows.Threading.DispatcherTimer _imageDecodeTimer = new()
     {
@@ -765,6 +767,7 @@ public partial class MainWindow : Window
         {
             _mediaCache.Clear();
             _mediaReadsInFlight.Clear();
+            _imageDecodesInFlight.Clear();
             _videoCoverLoadsInFlight.Clear();
             _failedMedia.Clear();
             _cacheBytes = 0;
@@ -856,9 +859,7 @@ public partial class MainWindow : Window
 
                 if (page.Image is null)
                 {
-                    using var stream = CreateReadOnlyMemoryStream(page.EncodedImageData.Value);
-                    page.SetImage(DecodeImage(stream, decodePixelWidth), _pageWidth);
-                    EnforceDecodedImageBudget(GetDecodedImageIndexes());
+                    RequestImageDecode(page, page.EncodedImageData.Value, decodePixelWidth);
                 }
 
                 continue;
@@ -869,6 +870,134 @@ public partial class MainWindow : Window
                 EnsureVideoCoverFromCache(page);
             }
         }
+    }
+
+    private void RequestImageDecode(ComicPage page, ArraySegment<byte> encodedImageData, int decodePixelWidth)
+    {
+        if (IsMediaFailed(page.EntryKey))
+        {
+            return;
+        }
+
+        var generation = _cacheGeneration;
+        var decodeKey = GetImageDecodeKey(generation, page.EntryKey, decodePixelWidth);
+        lock (_cacheLock)
+        {
+            if (_imageDecodesInFlight.Contains(decodeKey))
+            {
+                return;
+            }
+
+            _imageDecodesInFlight.Add(decodeKey);
+        }
+
+        _ = DecodeImageInBackgroundAsync(new ImageDecodeRequest(
+            page.Index,
+            page.EntryKey,
+            encodedImageData,
+            decodePixelWidth,
+            generation,
+            decodeKey));
+    }
+
+    private async Task DecodeImageInBackgroundAsync(ImageDecodeRequest request)
+    {
+        try
+        {
+            var image = await Task.Run(() =>
+            {
+                _imageDecodeConcurrency.Wait();
+                try
+                {
+                    using var stream = CreateReadOnlyMemoryStream(request.EncodedImageData);
+                    return DecodeImage(stream, request.DecodePixelWidth);
+                }
+                finally
+                {
+                    _imageDecodeConcurrency.Release();
+                }
+            });
+
+            await Dispatcher.InvokeAsync(
+                () => AcceptDecodedImage(request, image),
+                System.Windows.Threading.DispatcherPriority.Background);
+        }
+        catch (Exception ex)
+        {
+            await Dispatcher.InvokeAsync(
+                () => FinishFailedImageDecode(request, ex),
+                System.Windows.Threading.DispatcherPriority.Background);
+        }
+        finally
+        {
+            lock (_cacheLock)
+            {
+                _imageDecodesInFlight.Remove(request.DecodeKey);
+            }
+        }
+    }
+
+    private void AcceptDecodedImage(ImageDecodeRequest request, BitmapImage image)
+    {
+        if (!IsFreshImageDecode(request))
+        {
+            return;
+        }
+
+        var page = Pages[request.PageIndex];
+        page.SetImage(image, _pageWidth);
+        EnforceDecodedImageBudget(GetDecodedImageIndexes());
+    }
+
+    private bool IsFreshImageDecode(ImageDecodeRequest request)
+    {
+        if (request.Generation != _cacheGeneration
+            || request.DecodePixelWidth != GetDecodePixelWidth()
+            || request.PageIndex < 0
+            || request.PageIndex >= Pages.Count
+            || !GetDecodedImageIndexes().Contains(request.PageIndex))
+        {
+            return false;
+        }
+
+        var page = Pages[request.PageIndex];
+        return page.IsImage
+            && page.Image is null
+            && string.Equals(page.EntryKey, request.EntryKey, StringComparison.Ordinal)
+            && page.EncodedImageDataEquals(request.EncodedImageData);
+    }
+
+    private void FinishFailedImageDecode(ImageDecodeRequest request, Exception exception)
+    {
+        if (request.Generation != _cacheGeneration
+            || request.PageIndex < 0
+            || request.PageIndex >= Pages.Count
+            || !string.Equals(Pages[request.PageIndex].EntryKey, request.EntryKey, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        lock (_cacheLock)
+        {
+            _failedMedia.Add(request.EntryKey);
+        }
+
+        StatusTextBlock.Text = $"图片解码失败：{Path.GetFileName(request.EntryKey)} - {exception.Message}";
+    }
+
+    private bool IsMediaFailed(string entryKey)
+    {
+        lock (_cacheLock)
+        {
+            return _failedMedia.Contains(entryKey);
+        }
+    }
+
+    private static string GetImageDecodeKey(int generation, string entryKey, int decodePixelWidth)
+    {
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"{generation}\u001F{decodePixelWidth}\u001F{entryKey}");
     }
 
     private void EnforceDecodedImageBudget(HashSet<int> protectedIndexes)
@@ -1860,6 +1989,14 @@ public partial class MainWindow : Window
         int PageIndex,
         string EntryKey,
         ComicMediaType Type);
+
+    private sealed record ImageDecodeRequest(
+        int PageIndex,
+        string EntryKey,
+        ArraySegment<byte> EncodedImageData,
+        int DecodePixelWidth,
+        int Generation,
+        string DecodeKey);
 
     private sealed class ArchiveSession : IDisposable
     {
