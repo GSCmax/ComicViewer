@@ -94,6 +94,15 @@
             </Style.Triggers>
         </Style>
 
+        <Style x:Key="VideoPlaybackHostVisibilityStyle" TargetType="{x:Type ContentControl}">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsVideoPlaying}" Value="True">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
         <Style x:Key="VideoBadgeBorderStyle"
                TargetType="{x:Type Border}"
                BasedOn="{StaticResource OverlayBadgeBorderStyle}">
@@ -529,6 +538,9 @@
                                    Stretch="Uniform"
                                    IsHitTestVisible="False"
                                    Style="{StaticResource VideoFrameVisibilityStyle}" />
+
+                            <ContentControl Content="{Binding PlaybackElement}"
+                                            Style="{StaticResource VideoPlaybackHostVisibilityStyle}" />
 
                             <Button HorizontalAlignment="Center"
                                     VerticalAlignment="Center"

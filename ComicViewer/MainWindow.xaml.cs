@@ -1,4 +1,3 @@
-using LibVLCSharp.Shared;
 using Microsoft.Win32;
 using SharpCompress.Archives;
 using SharpCompress.Readers;
@@ -8,7 +7,6 @@ using System.Globalization;
 using System.IO;
 using System.Runtime;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
@@ -16,8 +14,6 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
-using VlcMedia = LibVLCSharp.Shared.Media;
-using VlcMediaPlayer = LibVLCSharp.Shared.MediaPlayer;
 
 namespace ComicViewer;
 
@@ -29,7 +25,6 @@ public partial class MainWindow : Window
     private const long MaxInMemoryVideoPlaybackBytes = MaxMediaCacheBytes;
     private const double MouseWheelScrollMultiplier = 5d;
     private const double MouseWheelPixelsPerLine = 16d;
-    private static readonly TimeSpan CoverFrameTimeout = TimeSpan.FromSeconds(2);
 
     private static readonly HashSet<string> ImageExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -59,7 +54,6 @@ public partial class MainWindow : Window
     private readonly HashSet<string> _loadsInFlight = new(StringComparer.Ordinal);
     private readonly HashSet<string> _decodesInFlight = new(StringComparer.Ordinal);
     private readonly HashSet<string> _failedMedia = new(StringComparer.Ordinal);
-    private readonly LibVLC _libVlc;
 
     private ArchiveSession? _archiveSession;
     private CancellationTokenSource? _mediaLoadCts;
@@ -82,9 +76,6 @@ public partial class MainWindow : Window
 
     public MainWindow()
     {
-        Core.Initialize();
-        _libVlc = new LibVLC();
-
         InitializeComponent();
 
         WindowBackdropHelper.Apply(this);
@@ -99,7 +90,6 @@ public partial class MainWindow : Window
             CancelVideoPlayLoad();
             StopAllVideos();
             DisposeArchiveSession();
-            _libVlc.Dispose();
         };
     }
 
@@ -541,12 +531,8 @@ public partial class MainWindow : Window
 
             using var encodedMedia = session.CopyEntryToMemory(request.EntryKey, cancellationToken);
             var videoData = TakeMemorySegment(encodedMedia);
-            var coverFrame = await TryRenderVideoCoverFrameAsync(
-                request.Page,
-                CreateReadOnlyMemoryStream(videoData),
-                cancellationToken);
             await Dispatcher.InvokeAsync(
-                () => AcceptVideo(request, videoData, coverFrame, generation),
+                () => AcceptVideo(request, videoData, generation),
                 System.Windows.Threading.DispatcherPriority.Background);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -636,7 +622,7 @@ public partial class MainWindow : Window
         UpdateReadingStatus(GetCurrentPageIndex());
     }
 
-    private void AcceptVideo(MediaLoadRequest request, ArraySegment<byte> videoData, ImageSource? coverFrame, int generation)
+    private void AcceptVideo(MediaLoadRequest request, ArraySegment<byte> videoData, int generation)
     {
         if (!IsFreshRequest(request, generation))
         {
@@ -645,13 +631,8 @@ public partial class MainWindow : Window
         }
 
         var page = Pages[request.PageIndex];
-        StoreCachedMedia(new CachedMedia(request.EntryKey, request.PageIndex, request.Type, null, videoData, coverFrame, videoData.Count), request);
-        if (coverFrame is not null && !page.IsVideoPlaying)
-        {
-            page.SetVideoFrame(coverFrame);
-        }
-
-        page.SetCoverLoadStatus(coverFrame is null ? VideoCoverLoadStatus.Failed : VideoCoverLoadStatus.Success);
+        StoreCachedMedia(new CachedMedia(request.EntryKey, request.PageIndex, request.Type, null, videoData, null, videoData.Count), request);
+        page.SetCoverLoadStatus(VideoCoverLoadStatus.Success);
         EvictMediaOverBudget();
         UpdateReadingStatus(GetCurrentPageIndex());
     }
@@ -1043,20 +1024,17 @@ public partial class MainWindow : Window
                 return;
             }
 
-            session = CreateVideoSession(page, videoStream, disableAudio: false);
-            videoStream = null;
+            var videoData = TakeMemorySegment(videoStream);
+            session = CreateVideoSession(page, videoData);
             page.SetVideoPlaybackSession(session);
             assignedToPage = true;
             AttachPlaybackEvents(page, session);
             page.IsVideoPlaying = true;
             page.IsVideoPaused = false;
-            session.MediaPlayer.Mute = false;
-            session.MediaPlayer.Volume = 100;
 
-            if (!session.MediaPlayer.Play())
-            {
-                throw new InvalidOperationException("播放器没有成功启动视频。");
-            }
+            await Dispatcher.InvokeAsync(() => PagesListBox.UpdateLayout());
+            await session.WaitForHostReadyAsync(TimeSpan.FromSeconds(2), cancellationToken);
+            session.Play();
 
             StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - 使用内存播放";
         }
@@ -1114,92 +1092,14 @@ public partial class MainWindow : Window
             : new MemoryStream(data.Array, data.Offset, data.Count, writable: false);
     }
 
-    private async Task<ImageSource?> TryRenderVideoCoverFrameAsync(
-        ComicPage page,
-        MemoryStream videoStream,
-        CancellationToken cancellationToken)
+    private static VideoPlaybackSession CreateVideoSession(ComicPage page, ArraySegment<byte> videoData)
     {
-        VideoPlaybackSession? session = null;
-        ImageSource? coverFrame = null;
-        var streamOwnedBySession = false;
-        try
-        {
-            session = CreateVideoSession(page, videoStream, disableAudio: true, frame => coverFrame = frame, updatePageFrame: false);
-            page.SetCoverSession(session);
-            streamOwnedBySession = true;
-
-            if (!session.MediaPlayer.Play())
-            {
-                return null;
-            }
-
-            await session.Renderer.FirstFrameDisplayed.WaitAsync(CoverFrameTimeout, cancellationToken);
-            return coverFrame;
-        }
-        catch (TimeoutException)
-        {
-            return null;
-        }
-        finally
-        {
-            if (!streamOwnedBySession)
-            {
-                videoStream.Dispose();
-            }
-
-            if (session is not null)
-            {
-                page.DetachCoverSession(session);
-                await Task.Run(() =>
-                {
-                    try
-                    {
-                        session.Stop();
-                        session.Dispose();
-                    }
-                    catch
-                    {
-                    }
-                }, CancellationToken.None);
-            }
-        }
-    }
-
-    private VideoPlaybackSession CreateVideoSession(
-        ComicPage page,
-        MemoryStream videoStream,
-        bool disableAudio,
-        Action<ImageSource>? onFrame = null,
-        bool updatePageFrame = true)
-    {
-        var input = new StreamMediaInput(videoStream);
-        var media = new VlcMedia(_libVlc, input);
-        if (disableAudio)
-        {
-            media.AddOption(":no-audio");
-        }
-
-        var mediaPlayer = new VlcMediaPlayer(_libVlc);
-        var renderer = new VideoFrameRenderer(
-            frame =>
-            {
-                if (updatePageFrame)
-                {
-                    page.SetVideoFrame(frame);
-                }
-
-                onFrame?.Invoke(frame);
-            },
-            (width, height) => page.SetAspectRatio((double)height / width, _pageWidth));
-
-        renderer.AttachTo(mediaPlayer);
-        mediaPlayer.Media = media;
-        return new VideoPlaybackSession(videoStream, input, media, mediaPlayer, renderer);
+        return new VideoPlaybackSession(videoData);
     }
 
     private void AttachPlaybackEvents(ComicPage page, VideoPlaybackSession session)
     {
-        session.MediaPlayer.Playing += (_, _) => Dispatcher.BeginInvoke((Action)(() =>
+        session.Playing += () => Dispatcher.BeginInvoke((Action)(() =>
         {
             if (page.PlaybackSession == session)
             {
@@ -1208,7 +1108,7 @@ public partial class MainWindow : Window
             }
         }));
 
-        session.MediaPlayer.Paused += (_, _) => Dispatcher.BeginInvoke((Action)(() =>
+        session.Paused += () => Dispatcher.BeginInvoke((Action)(() =>
         {
             if (page.PlaybackSession == session)
             {
@@ -1217,23 +1117,23 @@ public partial class MainWindow : Window
             }
         }));
 
-        session.MediaPlayer.LengthChanged += (_, args) => Dispatcher.BeginInvoke((Action)(() =>
+        session.DurationChanged += durationMs => Dispatcher.BeginInvoke((Action)(() =>
         {
             if (page.PlaybackSession == session)
             {
-                page.SetVideoDuration(args.Length);
+                page.SetVideoDuration(durationMs);
             }
         }));
 
-        session.MediaPlayer.TimeChanged += (_, args) => Dispatcher.BeginInvoke((Action)(() =>
+        session.TimeChanged += positionMs => Dispatcher.BeginInvoke((Action)(() =>
         {
             if (page.PlaybackSession == session)
             {
-                page.SetVideoPosition(args.Time);
+                page.SetVideoPosition(positionMs);
             }
         }));
 
-        session.MediaPlayer.EndReached += (_, _) => Dispatcher.BeginInvoke((Action)(() =>
+        session.EndReached += () => Dispatcher.BeginInvoke((Action)(() =>
         {
             if (page.PlaybackSession == session)
             {
@@ -1241,7 +1141,7 @@ public partial class MainWindow : Window
             }
         }), System.Windows.Threading.DispatcherPriority.Background);
 
-        session.MediaPlayer.EncounteredError += (_, _) => Dispatcher.BeginInvoke((Action)(() =>
+        session.PlaybackError += () => Dispatcher.BeginInvoke((Action)(() =>
         {
             if (page.PlaybackSession != session)
             {
@@ -1293,7 +1193,6 @@ public partial class MainWindow : Window
         foreach (var page in Pages)
         {
             page.StopVideo();
-            page.StopCoverSession();
         }
     }
 
@@ -1916,7 +1815,6 @@ public sealed class ComicPage : INotifyPropertyChanged
     private ArraySegment<byte>? _encodedImageData;
     private BitmapImage? _image;
     private VideoPlaybackSession? _videoPlaybackSession;
-    private VideoPlaybackSession? _coverSession;
     private ImageSource? _videoFrame;
     private bool _isVideoPaused;
     private bool _isVideoPlaying;
@@ -1962,6 +1860,8 @@ public sealed class ComicPage : INotifyPropertyChanged
     public string DisplayNumber => (Index + 1).ToString(CultureInfo.InvariantCulture);
 
     public VideoPlaybackSession? PlaybackSession => _videoPlaybackSession;
+
+    public FrameworkElement? PlaybackElement => _videoPlaybackSession?.View;
 
     public BitmapImage? Image
     {
@@ -2130,26 +2030,7 @@ public sealed class ComicPage : INotifyPropertyChanged
     public void SetVideoPlaybackSession(VideoPlaybackSession session)
     {
         _videoPlaybackSession = session;
-    }
-
-    public void SetCoverSession(VideoPlaybackSession session)
-    {
-        DisposeSessionInBackground(_coverSession, stopFirst: true);
-        _coverSession = session;
-    }
-
-    public void DetachCoverSession(VideoPlaybackSession session)
-    {
-        if (ReferenceEquals(_coverSession, session))
-        {
-            _coverSession = null;
-        }
-    }
-
-    public void StopCoverSession()
-    {
-        DisposeSessionInBackground(_coverSession, stopFirst: true);
-        _coverSession = null;
+        OnPropertyChanged(nameof(PlaybackElement));
     }
 
     public void PauseVideo()
@@ -2159,7 +2040,7 @@ public sealed class ComicPage : INotifyPropertyChanged
             return;
         }
 
-        _videoPlaybackSession.MediaPlayer.SetPause(true);
+        _videoPlaybackSession.Pause();
         IsVideoPaused = true;
     }
 
@@ -2170,7 +2051,7 @@ public sealed class ComicPage : INotifyPropertyChanged
             return;
         }
 
-        _videoPlaybackSession.MediaPlayer.SetPause(false);
+        _videoPlaybackSession.Resume();
         IsVideoPlaying = true;
         IsVideoPaused = false;
     }
@@ -2213,6 +2094,7 @@ public sealed class ComicPage : INotifyPropertyChanged
         SetVideoPosition(0);
         DisposeSessionInBackground(_videoPlaybackSession, stopFirst: true);
         _videoPlaybackSession = null;
+        OnPropertyChanged(nameof(PlaybackElement));
     }
 
     public void Resize(double pageWidth)
@@ -2274,242 +2156,6 @@ public enum VideoCoverLoadStatus
     Success,
     Failed,
     Oversized
-}
-
-public sealed class VideoPlaybackSession : IDisposable
-{
-    private readonly MemoryStream _videoStream;
-    private readonly StreamMediaInput _input;
-    private readonly VlcMedia _media;
-    private readonly VideoFrameRenderer _renderer;
-    private bool _isStopped;
-    private bool _isDisposed;
-
-    public VideoPlaybackSession(
-        MemoryStream videoStream,
-        StreamMediaInput input,
-        VlcMedia media,
-        VlcMediaPlayer mediaPlayer,
-        VideoFrameRenderer renderer)
-    {
-        _videoStream = videoStream;
-        _input = input;
-        _media = media;
-        _renderer = renderer;
-        MediaPlayer = mediaPlayer;
-    }
-
-    public VlcMediaPlayer MediaPlayer { get; }
-
-    public VideoFrameRenderer Renderer => _renderer;
-
-    public void Stop()
-    {
-        if (_isStopped || _isDisposed)
-        {
-            return;
-        }
-
-        _isStopped = true;
-        if (MediaPlayer.IsPlaying)
-        {
-            MediaPlayer.Stop();
-        }
-    }
-
-    public void Dispose()
-    {
-        if (_isDisposed)
-        {
-            return;
-        }
-
-        _isDisposed = true;
-        MediaPlayer.Dispose();
-        _renderer.Dispose();
-        _media.Dispose();
-        _input.Dispose();
-        _videoStream.Dispose();
-    }
-}
-
-public sealed class VideoFrameRenderer : IDisposable
-{
-    private readonly Action<ImageSource> _setFrame;
-    private readonly Action<uint, uint> _setVideoSize;
-    private readonly TaskCompletionSource _firstFrameDisplayed = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly VlcMediaPlayer.LibVLCVideoLockCb _lockCallback;
-    private readonly VlcMediaPlayer.LibVLCVideoUnlockCb _unlockCallback;
-    private readonly VlcMediaPlayer.LibVLCVideoDisplayCb _displayCallback;
-    private readonly VlcMediaPlayer.LibVLCVideoFormatCb _formatCallback;
-    private readonly VlcMediaPlayer.LibVLCVideoCleanupCb _cleanupCallback;
-    private readonly object _frameSync = new();
-
-    private byte[]? _frameBuffer;
-    private byte[]? _pendingFrame;
-    private GCHandle _frameBufferHandle;
-    private WriteableBitmap? _bitmap;
-    private uint _width;
-    private uint _height;
-    private uint _pitch;
-    private bool _frameUpdateQueued;
-    private bool _isDisposed;
-
-    public VideoFrameRenderer(Action<ImageSource> setFrame, Action<uint, uint> setVideoSize)
-    {
-        _setFrame = setFrame;
-        _setVideoSize = setVideoSize;
-        _lockCallback = LockVideo;
-        _unlockCallback = UnlockVideo;
-        _displayCallback = DisplayVideo;
-        _formatCallback = FormatVideo;
-        _cleanupCallback = CleanupVideo;
-    }
-
-    public Task FirstFrameDisplayed => _firstFrameDisplayed.Task;
-
-    public void AttachTo(VlcMediaPlayer mediaPlayer)
-    {
-        mediaPlayer.SetVideoFormatCallbacks(_formatCallback, _cleanupCallback);
-        mediaPlayer.SetVideoCallbacks(_lockCallback, _unlockCallback, _displayCallback);
-    }
-
-    private uint FormatVideo(ref IntPtr opaque, IntPtr chroma, ref uint width, ref uint height, ref uint pitches, ref uint lines)
-    {
-        _width = width;
-        _height = height;
-        _pitch = width * 4;
-        pitches = _pitch;
-        lines = height;
-
-        Marshal.Copy("RV32"u8.ToArray(), 0, chroma, 4);
-        AllocateFrameBuffer((int)(_pitch * _height));
-
-        Application.Current.Dispatcher.Invoke(() =>
-        {
-            _bitmap = new WriteableBitmap((int)_width, (int)_height, 96, 96, PixelFormats.Bgr32, null);
-            _setVideoSize(_width, _height);
-        });
-
-        return 1;
-    }
-
-    private IntPtr LockVideo(IntPtr opaque, IntPtr planes)
-    {
-        lock (_frameSync)
-        {
-            if (!_isDisposed && _frameBufferHandle.IsAllocated)
-            {
-                Marshal.WriteIntPtr(planes, _frameBufferHandle.AddrOfPinnedObject());
-            }
-        }
-
-        return IntPtr.Zero;
-    }
-
-    private void UnlockVideo(IntPtr opaque, IntPtr picture, IntPtr planes)
-    {
-    }
-
-    private void DisplayVideo(IntPtr opaque, IntPtr picture)
-    {
-        if (_isDisposed || _frameBuffer is null || _bitmap is null || _width == 0 || _height == 0)
-        {
-            return;
-        }
-
-        var frameSize = (int)(_pitch * _height);
-        var shouldQueueRender = false;
-        lock (_frameSync)
-        {
-            if (_isDisposed || _frameBuffer is null)
-            {
-                return;
-            }
-
-            if (_pendingFrame is null || _pendingFrame.Length != frameSize)
-            {
-                _pendingFrame = new byte[frameSize];
-            }
-
-            Buffer.BlockCopy(_frameBuffer, 0, _pendingFrame, 0, frameSize);
-            if (!_frameUpdateQueued)
-            {
-                _frameUpdateQueued = true;
-                shouldQueueRender = true;
-            }
-        }
-
-        if (shouldQueueRender)
-        {
-            Application.Current.Dispatcher.BeginInvoke((Action)RenderPendingFrame, System.Windows.Threading.DispatcherPriority.Render);
-        }
-    }
-
-    private void RenderPendingFrame()
-    {
-        lock (_frameSync)
-        {
-            if (_isDisposed || _bitmap is null || _pendingFrame is null || _width == 0 || _height == 0)
-            {
-                _frameUpdateQueued = false;
-                return;
-            }
-
-            _bitmap.WritePixels(new Int32Rect(0, 0, (int)_width, (int)_height), _pendingFrame, (int)_pitch, 0);
-            _setFrame(_bitmap);
-            _frameUpdateQueued = false;
-            _firstFrameDisplayed.TrySetResult();
-        }
-    }
-
-    private void CleanupVideo(ref IntPtr opaque)
-    {
-        ReleaseFrameBuffer();
-    }
-
-    private void AllocateFrameBuffer(int size)
-    {
-        lock (_frameSync)
-        {
-            ReleaseFrameBufferCore();
-            _frameBuffer = new byte[size];
-            _frameBufferHandle = GCHandle.Alloc(_frameBuffer, GCHandleType.Pinned);
-        }
-    }
-
-    private void ReleaseFrameBuffer()
-    {
-        lock (_frameSync)
-        {
-            ReleaseFrameBufferCore();
-            _pendingFrame = null;
-            _frameUpdateQueued = false;
-        }
-    }
-
-    private void ReleaseFrameBufferCore()
-    {
-        if (_frameBufferHandle.IsAllocated)
-        {
-            _frameBufferHandle.Free();
-        }
-
-        _frameBuffer = null;
-    }
-
-    public void Dispose()
-    {
-        lock (_frameSync)
-        {
-            _isDisposed = true;
-            _pendingFrame = null;
-            _frameUpdateQueued = false;
-        }
-
-        _firstFrameDisplayed.TrySetCanceled();
-        ReleaseFrameBuffer();
-    }
 }
 
 public sealed class MinimumThumbTrack : Track
