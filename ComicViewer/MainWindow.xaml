@@ -470,7 +470,7 @@
         </Grid.RowDefinitions>
 
         <DockPanel Grid.Row="0"
-                   Background="{StaticResource SurfaceBrush}"
+                   Background="{DynamicResource SurfaceBrush}"
                    LastChildFill="True">
             <Button x:Name="OpenArchiveButton"
                     DockPanel.Dock="Left"
@@ -500,7 +500,7 @@
                     Content="&#xE921;" />
             <TextBlock x:Name="StatusTextBlock"
                        VerticalAlignment="Center"
-                       Foreground="{StaticResource TextMutedBrush}"
+                       Foreground="{DynamicResource TextMutedBrush}"
                        TextTrimming="CharacterEllipsis"
                        Text="请选择 zip 或 rar 漫画压缩包" />
         </DockPanel>
@@ -558,7 +558,7 @@
 
         <Grid x:Name="PasswordOverlay"
               Grid.Row="1"
-              Background="{StaticResource OverlayPressedBrush}"
+              Background="{DynamicResource OverlayPressedBrush}"
               Visibility="Collapsed">
             <Border Style="{StaticResource PasswordPanelBorderStyle}">
                 <Grid>
