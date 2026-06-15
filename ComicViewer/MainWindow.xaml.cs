@@ -86,6 +86,9 @@ public partial class MainWindow : Window
         _libVlc = new LibVLC();
 
         InitializeComponent();
+
+        WindowBackdropHelper.Apply(this);
+
         DataContext = this;
         LoadPasswordHistory();
 

@@ -20,6 +20,7 @@
     </shell:WindowChrome.WindowChrome>
 
     <Window.Resources>
+        <SolidColorBrush x:Key="TransparentBrush" Color="Transparent" />
         <SolidColorBrush x:Key="AppBackgroundBrush" Color="#111111" />
         <SolidColorBrush x:Key="SurfaceBrush" Color="#202020" />
         <SolidColorBrush x:Key="SurfaceRaisedBrush" Color="#303030" />
@@ -61,7 +62,7 @@
 
         <Style x:Key="PageContainerGridStyle" TargetType="{x:Type Grid}">
             <Setter Property="HorizontalAlignment" Value="Left" />
-            <Setter Property="Background" Value="{StaticResource AppBackgroundBrush}" />
+            <Setter Property="Background" Value="{StaticResource TransparentBrush}" />
             <Setter Property="SnapsToDevicePixels" Value="True" />
             <Setter Property="UseLayoutRounding" Value="True" />
         </Style>
@@ -193,8 +194,8 @@
         <Style x:Key="CaptionButtonStyle" TargetType="{x:Type Button}">
             <Setter Property="Width" Value="46" />
             <Setter Property="Height" Value="40" />
-            <Setter Property="Background" Value="Transparent" />
-            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="Background" Value="{StaticResource TransparentBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource TransparentBrush}" />
             <Setter Property="BorderThickness" Value="0" />
             <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
             <Setter Property="FontFamily" Value="Segoe MDL2 Assets" />
@@ -304,7 +305,7 @@
 
         <Style x:Key="InvisibleScrollBarButtonStyle" TargetType="{x:Type RepeatButton}">
             <Setter Property="Focusable" Value="False" />
-            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Background" Value="{StaticResource TransparentBrush}" />
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="{x:Type RepeatButton}">
@@ -345,12 +346,12 @@
 
         <Style x:Key="ComicScrollBarStyle" TargetType="{x:Type ScrollBar}">
             <Setter Property="Width" Value="14" />
-            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Background" Value="{StaticResource TransparentBrush}" />
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="{x:Type ScrollBar}">
                         <Grid Width="{TemplateBinding Width}"
-                              Background="Transparent">
+                              Background="{StaticResource TransparentBrush}">
                             <local:MinimumThumbTrack x:Name="PART_Track"
                                                      IsDirectionReversed="True"
                                                      MinimumThumbLength="40">
@@ -409,7 +410,7 @@
             <Setter Property="Padding" Value="0" />
             <Setter Property="Margin" Value="0" />
             <Setter Property="BorderThickness" Value="0" />
-            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Background" Value="{StaticResource TransparentBrush}" />
             <Setter Property="Focusable" Value="False" />
             <Setter Property="HorizontalContentAlignment" Value="Left" />
             <Setter Property="Template">
@@ -424,7 +425,7 @@
         </Style>
 
         <Style x:Key="ComicPagesListBoxStyle" TargetType="{x:Type ListBox}">
-            <Setter Property="Background" Value="{StaticResource AppBackgroundBrush}" />
+            <Setter Property="Background" Value="{StaticResource TransparentBrush}" />
             <Setter Property="BorderThickness" Value="0" />
             <Setter Property="Padding" Value="0" />
             <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
@@ -520,7 +521,7 @@
                                Stretch="Fill"
                                Style="{StaticResource ImagePageVisibilityStyle}" />
 
-                        <Grid Background="Transparent"
+                        <Grid Background="{DynamicResource TransparentBrush}"
                               MouseLeftButtonDown="VideoSurface_MouseLeftButtonDown"
                               Style="{StaticResource VideoSurfaceVisibilityStyle}">
 
