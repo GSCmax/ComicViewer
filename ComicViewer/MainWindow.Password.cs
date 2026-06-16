@@ -132,8 +132,6 @@ public partial class MainWindow
         var message = exception.ToString();
         return message.Contains("password", StringComparison.OrdinalIgnoreCase)
             || message.Contains("encrypted", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("crypt", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("crc", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("data error", StringComparison.OrdinalIgnoreCase);
+            || message.Contains("crypt", StringComparison.OrdinalIgnoreCase);
     }
 }

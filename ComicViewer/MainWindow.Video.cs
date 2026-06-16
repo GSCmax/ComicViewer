@@ -94,7 +94,7 @@ public partial class MainWindow
             StatusTextBlock.Text = $"正在准备播放 {Path.GetFileName(page.EntryKey)} ...";
 
             videoStream = TryCreateCachedVideoStream(page.EntryKey)
-                ?? await Task.Run(() => _archiveSession?.CopyEntryToMemory(page.EntryKey, cancellationToken), cancellationToken);
+                ?? await Task.Run(() => _archiveSession?.CopyEntryToMemory(page.EntryKey, cancellationToken, MaxInMemoryVideoPlaybackBytes), cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             if (videoStream is null || !IsVideoPlayRequestCurrent(playCts, archivePath, page))
             {

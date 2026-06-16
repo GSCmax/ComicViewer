@@ -23,9 +23,10 @@ public partial class MainWindow
                 return;
             }
 
-            _mediaLoadCts = new CancellationTokenSource();
+            var loadCts = new CancellationTokenSource();
+            _mediaLoadCts = loadCts;
             var generation = _cacheGeneration;
-            _mediaLoadTask = Task.Run(() => LoadMediaUntilCacheIsFullAsync(generation, _mediaLoadCts));
+            _mediaLoadTask = Task.Run(() => LoadMediaUntilCacheIsFullAsync(generation, loadCts));
         }
     }
 
@@ -99,7 +100,7 @@ public partial class MainWindow
 
             if (request.Type == ComicMediaType.Image)
             {
-                using var encodedImage = session.CopyEntryToMemory(request.EntryKey, cancellationToken);
+                using var encodedImage = session.CopyEntryToMemory(request.EntryKey, cancellationToken, MaxMediaCacheBytes);
                 var imageData = TakeMemorySegment(encodedImage);
                 await Dispatcher.InvokeAsync(
                     () => AcceptImage(request, imageData, generation),
@@ -117,7 +118,7 @@ public partial class MainWindow
                 },
                 System.Windows.Threading.DispatcherPriority.Background);
 
-            using var encodedMedia = session.CopyEntryToMemory(request.EntryKey, cancellationToken);
+            using var encodedMedia = session.CopyEntryToMemory(request.EntryKey, cancellationToken, MaxMediaCacheBytes);
             var videoData = TakeMemorySegment(encodedMedia);
             var coverFrame = await TryRenderVideoCoverFrameAsync(videoData, cancellationToken);
             await Dispatcher.InvokeAsync(
@@ -179,9 +180,13 @@ public partial class MainWindow
 
                 var isVisibleOrCurrent = index == _currentPageIndex || visiblePages.Contains(index);
                 var reservedBytes = EstimateReservation(page);
-                if (page.IsVideo && reservedBytes > MaxMediaCacheBytes)
+                if (reservedBytes > MaxMediaCacheBytes)
                 {
-                    page.SetCoverLoadStatus(VideoCoverLoadStatus.Oversized);
+                    if (page.IsVideo)
+                    {
+                        page.SetCoverLoadStatus(VideoCoverLoadStatus.Oversized);
+                    }
+
                     _failedMedia.Add(page.EntryKey);
                     continue;
                 }

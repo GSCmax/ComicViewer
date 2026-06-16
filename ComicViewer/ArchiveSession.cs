@@ -54,8 +54,13 @@ internal sealed class ArchiveSession : IDisposable
         }
     }
 
-    public MemoryStream CopyEntryToMemory(string entryKey, CancellationToken cancellationToken)
+    public MemoryStream CopyEntryToMemory(string entryKey, CancellationToken cancellationToken, long maxBytes)
     {
+        if (maxBytes <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxBytes), "Maximum entry size must be positive.");
+        }
+
         _archiveLock.Wait(cancellationToken);
         try
         {
@@ -63,11 +68,16 @@ internal sealed class ArchiveSession : IDisposable
             var entry = _entries.FirstOrDefault(entry => string.Equals(entry.Key, entryKey, StringComparison.Ordinal))
                 ?? throw new FileNotFoundException("Entry not found in archive.", entryKey);
 
+            if (entry.Size > maxBytes)
+            {
+                throw new InvalidOperationException("Entry exceeds the in-memory load limit.");
+            }
+
             using var source = entry.OpenEntryStream();
             var destination = entry.Size is > 0 and <= int.MaxValue
                 ? new MemoryStream(checked((int)entry.Size))
                 : new MemoryStream();
-            CopyToMemory(source, destination, cancellationToken);
+            CopyToMemory(source, destination, cancellationToken, maxBytes);
             destination.Position = 0;
             return destination;
         }
@@ -77,9 +87,10 @@ internal sealed class ArchiveSession : IDisposable
         }
     }
 
-    private static void CopyToMemory(Stream source, MemoryStream destination, CancellationToken cancellationToken)
+    private static void CopyToMemory(Stream source, MemoryStream destination, CancellationToken cancellationToken, long maxBytes)
     {
         var buffer = new byte[128 * 1024];
+        var totalBytesRead = 0L;
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -89,7 +100,13 @@ internal sealed class ArchiveSession : IDisposable
                 return;
             }
 
+            if (totalBytesRead > maxBytes - bytesRead)
+            {
+                throw new InvalidOperationException("Entry exceeds the in-memory load limit.");
+            }
+
             destination.Write(buffer, 0, bytesRead);
+            totalBytesRead += bytesRead;
         }
     }
 
@@ -117,7 +134,6 @@ internal sealed class ArchiveSession : IDisposable
         finally
         {
             _archiveLock.Release();
-            _archiveLock.Dispose();
         }
     }
 }
