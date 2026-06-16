@@ -1,15 +1,319 @@
 using OpenTK.Graphics.OpenGL4;
 using OpenTK.Wpf;
 using System.Diagnostics;
-using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Media;
 
 namespace ComicViewer;
 
-public sealed class VideoPlaybackSession : IDisposable
+public partial class MpvVideoPlayerControl : UserControl, IDisposable
+{
+    private MpvVideoPlaybackEngine? _engine;
+    private ArraySegment<byte>? _source;
+    private bool _isDisposed;
+
+    public static readonly DependencyProperty SourceBytesProperty = DependencyProperty.Register(
+        nameof(SourceBytes),
+        typeof(byte[]),
+        typeof(MpvVideoPlayerControl),
+        new PropertyMetadata(null, OnSourceBytesChanged));
+
+    public MpvVideoPlayerControl()
+    {
+        InitializeComponent();
+    }
+
+    public MpvVideoPlayerControl(ArraySegment<byte> source)
+        : this()
+    {
+        SetSource(source);
+    }
+
+    public event Action? Playing;
+    public event Action? Paused;
+    public event Action<long>? DurationChanged;
+    public event Action<long>? TimeChanged;
+    public event Action<long, long>? VideoSizeChanged;
+    public event Action? EndReached;
+    public event Action? PlaybackError;
+
+    public bool IsPlaying { get; private set; }
+
+    public bool IsPaused { get; private set; }
+
+    public bool IsPreparing { get; private set; }
+
+    public byte[]? SourceBytes
+    {
+        get => (byte[]?)GetValue(SourceBytesProperty);
+        set => SetValue(SourceBytesProperty, value);
+    }
+
+    public static Task<ArraySegment<byte>?> TryRenderFirstFramePngAsync(
+        ArraySegment<byte> videoData,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        return MpvVideoPlaybackEngine.TryRenderFirstFramePngAsync(videoData, timeout, cancellationToken);
+    }
+
+    public void SetSource(ArraySegment<byte> source)
+    {
+        ThrowIfDisposed();
+        if (source.Array is null)
+        {
+            throw new ArgumentException("Video data must reference a byte array.", nameof(source));
+        }
+
+        Stop();
+        _source = source;
+    }
+
+    public void SetSource(byte[] source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        SetSource(new ArraySegment<byte>(source));
+    }
+
+    public Task WaitForHostReadyAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        return VideoView.WaitForReadyAsync(timeout, cancellationToken);
+    }
+
+    public async Task PlayAsync(CancellationToken cancellationToken = default)
+    {
+        await WaitForHostReadyAsync(TimeSpan.FromSeconds(2), cancellationToken);
+        Play();
+    }
+
+    public async Task PlayAsync(ArraySegment<byte> source, CancellationToken cancellationToken = default)
+    {
+        SetSource(source);
+        await PlayAsync(cancellationToken);
+    }
+
+    public async Task PlayAsync(byte[] source, CancellationToken cancellationToken = default)
+    {
+        SetSource(source);
+        await PlayAsync(cancellationToken);
+    }
+
+    public void Play()
+    {
+        ThrowIfDisposed();
+        var engine = EnsureEngine();
+        IsPreparing = true;
+        IsPaused = false;
+        engine.Play();
+    }
+
+    public void Pause()
+    {
+        if (_engine is null)
+        {
+            return;
+        }
+
+        _engine.Pause();
+    }
+
+    public void Resume()
+    {
+        if (_engine is null)
+        {
+            return;
+        }
+
+        _engine.Resume();
+    }
+
+    public void Stop()
+    {
+        if (_engine is null)
+        {
+            ResetPlaybackState();
+            return;
+        }
+
+        var engine = _engine;
+        _engine = null;
+        DetachEngineEvents(engine);
+        try
+        {
+            engine.Stop();
+        }
+        catch
+        {
+        }
+
+        engine.Dispose();
+        ResetPlaybackState();
+    }
+
+    public void Dispose()
+    {
+        if (_isDisposed)
+        {
+            return;
+        }
+
+        _isDisposed = true;
+        Stop();
+        if (VideoView.Dispatcher.CheckAccess())
+        {
+            VideoView.Dispose();
+        }
+        else
+        {
+            VideoView.Dispatcher.Invoke(VideoView.Dispose);
+        }
+    }
+
+    private static void OnSourceBytesChanged(DependencyObject dependencyObject, DependencyPropertyChangedEventArgs e)
+    {
+        var control = (MpvVideoPlayerControl)dependencyObject;
+        if (control._isDisposed)
+        {
+            return;
+        }
+
+        if (e.NewValue is byte[] bytes)
+        {
+            control.SetSource(bytes);
+        }
+        else
+        {
+            control.Stop();
+            control._source = null;
+        }
+    }
+
+    private MpvVideoPlaybackEngine EnsureEngine()
+    {
+        if (_engine is not null)
+        {
+            return _engine;
+        }
+
+        if (_source is not { } source)
+        {
+            throw new InvalidOperationException("视频源尚未设置。");
+        }
+
+        var engine = new MpvVideoPlaybackEngine(source, VideoView);
+        AttachEngineEvents(engine);
+        _engine = engine;
+        return engine;
+    }
+
+    private void AttachEngineEvents(MpvVideoPlaybackEngine engine)
+    {
+        engine.Playing += Engine_Playing;
+        engine.Paused += Engine_Paused;
+        engine.DurationChanged += Engine_DurationChanged;
+        engine.TimeChanged += Engine_TimeChanged;
+        engine.VideoSizeChanged += Engine_VideoSizeChanged;
+        engine.EndReached += Engine_EndReached;
+        engine.PlaybackError += Engine_PlaybackError;
+    }
+
+    private void DetachEngineEvents(MpvVideoPlaybackEngine engine)
+    {
+        engine.Playing -= Engine_Playing;
+        engine.Paused -= Engine_Paused;
+        engine.DurationChanged -= Engine_DurationChanged;
+        engine.TimeChanged -= Engine_TimeChanged;
+        engine.VideoSizeChanged -= Engine_VideoSizeChanged;
+        engine.EndReached -= Engine_EndReached;
+        engine.PlaybackError -= Engine_PlaybackError;
+    }
+
+    private void Engine_Playing()
+    {
+        RunOnUiThread(() =>
+        {
+            IsPreparing = false;
+            IsPlaying = true;
+            IsPaused = false;
+            Playing?.Invoke();
+        });
+    }
+
+    private void Engine_Paused()
+    {
+        RunOnUiThread(() =>
+        {
+            IsPaused = true;
+            Paused?.Invoke();
+        });
+    }
+
+    private void Engine_DurationChanged(long duration)
+    {
+        RunOnUiThread(() => DurationChanged?.Invoke(duration));
+    }
+
+    private void Engine_TimeChanged(long position)
+    {
+        RunOnUiThread(() => TimeChanged?.Invoke(position));
+    }
+
+    private void Engine_VideoSizeChanged(long width, long height)
+    {
+        RunOnUiThread(() => VideoSizeChanged?.Invoke(width, height));
+    }
+
+    private void Engine_EndReached()
+    {
+        RunOnUiThread(() =>
+        {
+            ResetPlaybackState();
+            EndReached?.Invoke();
+        });
+    }
+
+    private void Engine_PlaybackError()
+    {
+        RunOnUiThread(() =>
+        {
+            ResetPlaybackState();
+            PlaybackError?.Invoke();
+        });
+    }
+
+    private void RunOnUiThread(Action action)
+    {
+        if (Dispatcher.CheckAccess())
+        {
+            action();
+        }
+        else
+        {
+            Dispatcher.BeginInvoke(action);
+        }
+    }
+
+    private void ResetPlaybackState()
+    {
+        IsPreparing = false;
+        IsPlaying = false;
+        IsPaused = false;
+    }
+
+    private void ThrowIfDisposed()
+    {
+        if (_isDisposed)
+        {
+            throw new ObjectDisposedException(nameof(MpvVideoPlayerControl));
+        }
+    }
+}
+
+internal sealed class MpvVideoPlaybackEngine : IDisposable
 {
     private const string StreamUri = "comic://media";
 
@@ -27,7 +331,7 @@ public sealed class VideoPlaybackSession : IDisposable
 
     private ArraySegment<byte> VideoData => _videoData;
 
-    public VideoPlaybackSession(ArraySegment<byte> videoData)
+    public MpvVideoPlaybackEngine(ArraySegment<byte> videoData, MpvOpenGlVideoView view)
     {
         if (videoData.Array is null)
         {
@@ -35,7 +339,7 @@ public sealed class VideoPlaybackSession : IDisposable
         }
 
         _videoData = videoData;
-        _view = new MpvOpenGlVideoView();
+        _view = view;
         _view.FirstFrameRendered += ShowVideoSurface;
         _streamUserDataHandle = GCHandle.Alloc(this);
         _mpv = MpvNative.Create();
@@ -50,19 +354,12 @@ public sealed class VideoPlaybackSession : IDisposable
     public event Action? EndReached;
     public event Action? PlaybackError;
 
-    public FrameworkElement View => _view;
-
     public static Task<ArraySegment<byte>?> TryRenderFirstFramePngAsync(
         ArraySegment<byte> videoData,
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
         return Task.Run(() => TryRenderFirstFramePng(videoData, timeout, cancellationToken), cancellationToken);
-    }
-
-    public Task WaitForHostReadyAsync(TimeSpan timeout, CancellationToken cancellationToken)
-    {
-        return _view.WaitForReadyAsync(timeout, cancellationToken);
     }
 
     public void Play()
@@ -106,7 +403,7 @@ public sealed class VideoPlaybackSession : IDisposable
             _mpv = IntPtr.Zero;
         }
 
-        DisposeView();
+        ReleaseRenderer();
 
         if (mpv != IntPtr.Zero)
         {
@@ -312,21 +609,21 @@ public sealed class VideoPlaybackSession : IDisposable
         return (long)Math.Round(Math.Max(0, seconds) * 1000d);
     }
 
-    private void DisposeView()
+    private void ReleaseRenderer()
     {
-        void DisposeCore()
+        void ReleaseCore()
         {
             _view.FirstFrameRendered -= ShowVideoSurface;
-            _view.Dispose();
+            _view.DisposeRenderer();
         }
 
         if (_view.Dispatcher.CheckAccess())
         {
-            DisposeCore();
+            ReleaseCore();
         }
         else
         {
-            _view.Dispatcher.Invoke(DisposeCore);
+            _view.Dispatcher.Invoke(ReleaseCore);
         }
     }
 
@@ -334,7 +631,7 @@ public sealed class VideoPlaybackSession : IDisposable
     {
         if (_isDisposed || _mpv == IntPtr.Zero)
         {
-            throw new ObjectDisposedException(nameof(VideoPlaybackSession));
+            throw new ObjectDisposedException(nameof(MpvVideoPlaybackEngine));
         }
     }
 
@@ -407,7 +704,7 @@ public sealed class VideoPlaybackSession : IDisposable
         {
             ArraySegment<byte> videoData;
             var streamSource = GCHandle.FromIntPtr(userData).Target;
-            if (streamSource is VideoPlaybackSession session)
+            if (streamSource is MpvVideoPlaybackEngine session)
             {
                 videoData = session.VideoData;
             }
@@ -692,6 +989,18 @@ public sealed class MpvOpenGlVideoView : GLWpfControl
         return Dispatcher.Invoke(() => InitializeRendererCore(mpv));
     }
 
+    public void DisposeRenderer()
+    {
+        if (Dispatcher.CheckAccess())
+        {
+            DisposeRendererCore();
+        }
+        else
+        {
+            Dispatcher.Invoke(DisposeRendererCore);
+        }
+    }
+
     public void RequestRender()
     {
         _forceRender = true;
@@ -947,7 +1256,7 @@ public sealed class MpvOpenGlVideoView : GLWpfControl
     private static extern IntPtr GetProcAddress(IntPtr module, string procName);
 }
 
-public enum MpvFormat
+internal enum MpvFormat
 {
     None = 0,
     String = 1,
@@ -961,7 +1270,7 @@ public enum MpvFormat
     ByteArray = 9
 }
 
-public enum MpvEventId
+internal enum MpvEventId
 {
     None = 0,
     Shutdown = 1,
@@ -990,7 +1299,7 @@ public enum MpvEventId
     Hook = 25
 }
 
-public enum MpvEndFileReason
+internal enum MpvEndFileReason
 {
     Eof = 0,
     Stop = 2,
@@ -999,7 +1308,7 @@ public enum MpvEndFileReason
     Redirect = 5
 }
 
-public enum MpvRenderParamType
+internal enum MpvRenderParamType
 {
     Invalid = 0,
     ApiType = 1,
@@ -1009,7 +1318,7 @@ public enum MpvRenderParamType
 }
 
 [StructLayout(LayoutKind.Sequential)]
-public struct MpvEvent
+internal struct MpvEvent
 {
     public MpvEventId EventId;
     public int Error;
@@ -1018,7 +1327,7 @@ public struct MpvEvent
 }
 
 [StructLayout(LayoutKind.Sequential)]
-public struct MpvEventProperty
+internal struct MpvEventProperty
 {
     public IntPtr Name;
     public MpvFormat Format;
@@ -1026,7 +1335,7 @@ public struct MpvEventProperty
 }
 
 [StructLayout(LayoutKind.Sequential)]
-public struct MpvEventEndFile
+internal struct MpvEventEndFile
 {
     public MpvEndFileReason Reason;
     public int Error;
@@ -1036,7 +1345,7 @@ public struct MpvEventEndFile
 }
 
 [StructLayout(LayoutKind.Sequential)]
-public struct MpvStreamCbInfo
+internal struct MpvStreamCbInfo
 {
     public IntPtr Cookie;
     public IntPtr Read;
@@ -1047,7 +1356,7 @@ public struct MpvStreamCbInfo
 }
 
 [StructLayout(LayoutKind.Sequential)]
-public readonly struct MpvOpenGlInitParams
+internal readonly struct MpvOpenGlInitParams
 {
     public MpvOpenGlInitParams(IntPtr getProcAddress, IntPtr getProcAddressContext)
     {
@@ -1060,7 +1369,7 @@ public readonly struct MpvOpenGlInitParams
 }
 
 [StructLayout(LayoutKind.Sequential)]
-public readonly struct MpvOpenGlFbo
+internal readonly struct MpvOpenGlFbo
 {
     public MpvOpenGlFbo(int framebuffer, int width, int height, int internalFormat)
     {
@@ -1077,7 +1386,7 @@ public readonly struct MpvOpenGlFbo
 }
 
 [StructLayout(LayoutKind.Sequential)]
-public readonly struct MpvRenderParam
+internal readonly struct MpvRenderParam
 {
     public MpvRenderParam(MpvRenderParamType type, IntPtr data)
     {
@@ -1090,30 +1399,30 @@ public readonly struct MpvRenderParam
 }
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-public delegate int OpenStreamDelegate(IntPtr userData, IntPtr uri, IntPtr info);
+internal delegate int OpenStreamDelegate(IntPtr userData, IntPtr uri, IntPtr info);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-public delegate long ReadStreamDelegate(IntPtr cookie, IntPtr buffer, ulong nbytes);
+internal delegate long ReadStreamDelegate(IntPtr cookie, IntPtr buffer, ulong nbytes);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-public delegate long SeekStreamDelegate(IntPtr cookie, long offset);
+internal delegate long SeekStreamDelegate(IntPtr cookie, long offset);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-public delegate long SizeStreamDelegate(IntPtr cookie);
+internal delegate long SizeStreamDelegate(IntPtr cookie);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-public delegate void CloseStreamDelegate(IntPtr cookie);
+internal delegate void CloseStreamDelegate(IntPtr cookie);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-public delegate void CancelStreamDelegate(IntPtr cookie);
+internal delegate void CancelStreamDelegate(IntPtr cookie);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-public delegate IntPtr MpvOpenGlGetProcAddressDelegate(IntPtr context, IntPtr name);
+internal delegate IntPtr MpvOpenGlGetProcAddressDelegate(IntPtr context, IntPtr name);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-public delegate void MpvRenderUpdateDelegate(IntPtr callbackContext);
+internal delegate void MpvRenderUpdateDelegate(IntPtr callbackContext);
 
-public static class MpvRenderNative
+internal static class MpvRenderNative
 {
     [DllImport("libmpv-2.dll", CallingConvention = CallingConvention.Cdecl, EntryPoint = "mpv_render_context_create")]
     public static extern int RenderContextCreate(out IntPtr context, IntPtr handle, [In] MpvRenderParam[] parameters);
