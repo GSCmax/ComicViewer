@@ -138,6 +138,11 @@ public partial class MainWindow
                 }
 
                 FinishFailedRequest(request);
+                if (request.Type == ComicMediaType.Video)
+                {
+                    request.Page.SetCoverLoadStatus(VideoCoverLoadStatus.Failed);
+                }
+
                 StatusTextBlock.Text = $"{(request.Type == ComicMediaType.Image ? "图片" : "视频")}加载失败: {Path.GetFileName(request.EntryKey)} - {ex.Message}";
             }, System.Windows.Threading.DispatcherPriority.Background);
         }
@@ -230,7 +235,7 @@ public partial class MainWindow
             }
         }
 
-        page.SetCoverLoadStatus(VideoCoverLoadStatus.Success);
+        page.SetCoverLoadStatus(coverFrame is null ? VideoCoverLoadStatus.Failed : VideoCoverLoadStatus.Success);
         EvictMediaOverBudget();
         UpdateReadingStatus(GetCurrentPageIndex());
     }

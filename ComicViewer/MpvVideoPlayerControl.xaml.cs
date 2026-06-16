@@ -837,7 +837,7 @@ internal sealed class MpvVideoPlaybackEngine : IDisposable
                 .FirstOrDefault();
             if (framePath is null)
             {
-                return default(ArraySegment<byte>?);
+                return null;
             }
 
             return new ArraySegment<byte>(File.ReadAllBytes(framePath));

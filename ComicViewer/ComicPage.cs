@@ -157,7 +157,7 @@ public sealed class ComicPage : INotifyPropertyChanged
                 ? "正在准备播放..."
                 : _coverLoadStatus switch
                 {
-                    VideoCoverLoadStatus.Oversized => "视频过大，点击后加载播放",
+                    VideoCoverLoadStatus.Oversized => "视频过大，无法内存播放",
                     VideoCoverLoadStatus.Loading => "正在加载封面...",
                     VideoCoverLoadStatus.Failed => "封面加载失败，点击播放",
                     VideoCoverLoadStatus.Success => "点击播放",
