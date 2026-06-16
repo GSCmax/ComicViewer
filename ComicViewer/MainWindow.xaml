@@ -91,6 +91,9 @@
                 <DataTrigger Binding="{Binding VideoFrame}" Value="{x:Null}">
                     <Setter Property="Visibility" Value="Collapsed" />
                 </DataTrigger>
+                <DataTrigger Binding="{Binding IsVideoPlaying}" Value="True">
+                    <Setter Property="Visibility" Value="Collapsed" />
+                </DataTrigger>
             </Style.Triggers>
         </Style>
 
@@ -537,21 +540,24 @@
                               MouseLeftButtonDown="VideoSurface_MouseLeftButtonDown"
                               Style="{StaticResource VideoSurfaceVisibilityStyle}">
 
-                            <Image Source="{Binding VideoFrame}"
-                                   Stretch="Uniform"
-                                   IsHitTestVisible="False"
-                                   Style="{StaticResource VideoFrameVisibilityStyle}" />
-
                             <ContentControl Width="{Binding PlaybackHostWidth}"
                                             Height="{Binding PlaybackHostHeight}"
                                             HorizontalAlignment="Left"
                                             VerticalAlignment="Top"
+                                            Panel.ZIndex="0"
                                             Content="{Binding PlaybackElement}"
                                             Style="{StaticResource VideoPlaybackHostVisibilityStyle}" />
+
+                            <Image Source="{Binding VideoFrame}"
+                                   Stretch="Uniform"
+                                   IsHitTestVisible="False"
+                                   Panel.ZIndex="1"
+                                   Style="{StaticResource VideoFrameVisibilityStyle}" />
 
                             <Button HorizontalAlignment="Center"
                                     VerticalAlignment="Center"
                                     CommandParameter="{Binding}"
+                                    Panel.ZIndex="2"
                                     Style="{StaticResource PlayOverlayButtonStyle}"
                                     Click="PlayVideoButton_Click" />
                         </Grid>

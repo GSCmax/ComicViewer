@@ -11,7 +11,6 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
-using System.Windows.Interop;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -1127,12 +1126,7 @@ public partial class MainWindow : Window
 
     private VideoPlaybackSession CreateVideoSession(ComicPage page, ArraySegment<byte> videoData)
     {
-        return new VideoPlaybackSession(
-            videoData,
-            PagesListBox,
-            new WindowInteropHelper(this).Handle,
-            Math.Max(1, (int)Math.Round(page.DisplayWidth)),
-            Math.Max(1, (int)Math.Round(page.DisplayHeight)));
+        return new VideoPlaybackSession(videoData);
     }
 
     private void AttachPlaybackEvents(ComicPage page, VideoPlaybackSession session)
@@ -1912,7 +1906,7 @@ public sealed class ComicPage : INotifyPropertyChanged
 
     public FrameworkElement? PlaybackElement => _videoPlaybackSession?.View;
 
-    public bool IsPlaybackHostVisible => IsVideoPlaying;
+    public bool IsPlaybackHostVisible => IsVideoPlaying || IsVideoPreparing;
 
     public double PlaybackHostWidth => DisplayWidth;
 

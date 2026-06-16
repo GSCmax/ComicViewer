@@ -1,10 +1,10 @@
+using OpenTK.Graphics.OpenGL4;
+using OpenTK.Wpf;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
-using System.Windows.Interop;
-using System.Windows.Media;
 
 namespace ComicViewer;
 
@@ -14,24 +14,19 @@ public sealed class VideoPlaybackSession : IDisposable
 
     private readonly ArraySegment<byte> _videoData;
     private readonly object _mpvLock = new();
-    private readonly MpvVideoHost _view;
+    private readonly MpvOpenGlVideoView _view;
     private readonly GCHandle _streamUserDataHandle;
     private IntPtr _mpv;
     private Task? _eventLoopTask;
     private long _displayWidth;
     private long _displayHeight;
-    private bool _hasShownVideoWindow;
+    private bool _hasShownVideoSurface;
     private bool _isInitialized;
     private bool _isDisposed;
 
     private ArraySegment<byte> VideoData => _videoData;
 
-    public VideoPlaybackSession(
-        ArraySegment<byte> videoData,
-        FrameworkElement? clippingElement = null,
-        IntPtr initialParentHandle = default,
-        int initialWidth = 1,
-        int initialHeight = 1)
+    public VideoPlaybackSession(ArraySegment<byte> videoData)
     {
         if (videoData.Array is null)
         {
@@ -39,10 +34,11 @@ public sealed class VideoPlaybackSession : IDisposable
         }
 
         _videoData = videoData;
-        _view = new MpvVideoHost(clippingElement, initialParentHandle, initialWidth, initialHeight);
+        _view = new MpvOpenGlVideoView();
+        _view.FirstFrameRendered += ShowVideoSurface;
         _streamUserDataHandle = GCHandle.Alloc(this);
-        _mpv = MpvPlaybackHelper.Create();
-        MpvPlaybackHelper.Check(_mpv != IntPtr.Zero ? 0 : -1, "创建 mpv 播放器失败。");
+        _mpv = MpvNative.Create();
+        MpvNative.Check(_mpv != IntPtr.Zero ? 0 : -1, "创建 mpv 播放器失败。");
     }
 
     public event Action? Playing;
@@ -65,7 +61,7 @@ public sealed class VideoPlaybackSession : IDisposable
 
     public Task WaitForHostReadyAsync(TimeSpan timeout, CancellationToken cancellationToken)
     {
-        return _view.WaitForHandleAsync(timeout, cancellationToken);
+        return _view.WaitForReadyAsync(timeout, cancellationToken);
     }
 
     public void Play()
@@ -74,8 +70,8 @@ public sealed class VideoPlaybackSession : IDisposable
         {
             ThrowIfDisposed();
             EnsureInitialized();
-            MpvPlaybackHelper.Check(MpvPlaybackHelper.CommandString(_mpv, "set pause yes"), "mpv 无法准备首帧。");
-            MpvPlaybackHelper.Check(MpvPlaybackHelper.CommandString(_mpv, $"loadfile {StreamUri} replace"), "mpv 无法载入内存视频流。");
+            MpvNative.Check(MpvNative.CommandString(_mpv, "set pause yes"), "mpv 无法准备首帧。");
+            MpvNative.Check(MpvNative.CommandString(_mpv, $"loadfile {StreamUri} replace"), "mpv 无法载入内存视频流。");
         }
     }
 
@@ -109,9 +105,11 @@ public sealed class VideoPlaybackSession : IDisposable
             _mpv = IntPtr.Zero;
         }
 
+        DisposeView();
+
         if (mpv != IntPtr.Zero)
         {
-            MpvPlaybackHelper.TerminateDestroy(mpv);
+            MpvNative.TerminateDestroy(mpv);
         }
 
         try
@@ -126,8 +124,6 @@ public sealed class VideoPlaybackSession : IDisposable
         {
             _streamUserDataHandle.Free();
         }
-
-        DisposeView();
     }
 
     private void EnsureInitialized()
@@ -137,24 +133,20 @@ public sealed class VideoPlaybackSession : IDisposable
             return;
         }
 
-        if (_view.PlayerWindowHandle == IntPtr.Zero)
-        {
-            throw new InvalidOperationException("视频窗口尚未准备好。");
-        }
-
-        MpvPlaybackHelper.Check(MpvPlaybackHelper.SetOptionString(_mpv, "config", "no"), "mpv 选项设置失败。");
-        MpvPlaybackHelper.Check(MpvPlaybackHelper.SetOptionString(_mpv, "terminal", "no"), "mpv 选项设置失败。");
-        MpvPlaybackHelper.Check(MpvPlaybackHelper.SetOptionString(_mpv, "osc", "no"), "mpv 选项设置失败。");
-        MpvPlaybackHelper.Check(MpvPlaybackHelper.SetOptionString(_mpv, "input-default-bindings", "no"), "mpv 选项设置失败。");
-        MpvPlaybackHelper.Check(MpvPlaybackHelper.SetOptionString(_mpv, "input-vo-keyboard", "no"), "mpv 选项设置失败。");
-        MpvPlaybackHelper.Check(MpvPlaybackHelper.SetOptionString(_mpv, "wid", _view.PlayerWindowHandle.ToInt64().ToString(CultureInfo.InvariantCulture)), "mpv 选项设置失败。");
-        MpvPlaybackHelper.Check(MpvPlaybackHelper.Initialize(_mpv), "mpv 初始化失败。");
-        MpvPlaybackHelper.Check(MpvPlaybackHelper.StreamCbAddRo(_mpv, "comic", GCHandle.ToIntPtr(_streamUserDataHandle), MpvPlaybackHelper.OpenStreamCallback), "mpv 内存流注册失败。");
-        MpvPlaybackHelper.ObserveProperty(_mpv, 1, "time-pos", MpvFormat.Double);
-        MpvPlaybackHelper.ObserveProperty(_mpv, 2, "duration", MpvFormat.Double);
-        MpvPlaybackHelper.ObserveProperty(_mpv, 3, "pause", MpvFormat.Flag);
-        MpvPlaybackHelper.ObserveProperty(_mpv, 4, "dwidth", MpvFormat.Int64);
-        MpvPlaybackHelper.ObserveProperty(_mpv, 5, "dheight", MpvFormat.Int64);
+        MpvNative.Check(MpvNative.SetOptionString(_mpv, "config", "no"), "mpv 选项设置失败。");
+        MpvNative.Check(MpvNative.SetOptionString(_mpv, "terminal", "no"), "mpv 选项设置失败。");
+        MpvNative.Check(MpvNative.SetOptionString(_mpv, "osc", "no"), "mpv 选项设置失败。");
+        MpvNative.Check(MpvNative.SetOptionString(_mpv, "input-default-bindings", "no"), "mpv 选项设置失败。");
+        MpvNative.Check(MpvNative.SetOptionString(_mpv, "input-vo-keyboard", "no"), "mpv 选项设置失败。");
+        MpvNative.Check(MpvNative.SetOptionString(_mpv, "vo", "libmpv"), "mpv 选项设置失败。");
+        MpvNative.Check(MpvNative.Initialize(_mpv), "mpv 初始化失败。");
+        MpvNative.Check(MpvNative.StreamCbAddRo(_mpv, "comic", GCHandle.ToIntPtr(_streamUserDataHandle), MpvNative.OpenStreamCallback), "mpv 内存流注册失败。");
+        MpvNative.Check(_view.InitializeRenderer(_mpv), "mpv OpenGL 渲染器初始化失败。");
+        MpvNative.ObserveProperty(_mpv, 1, "time-pos", MpvFormat.Double);
+        MpvNative.ObserveProperty(_mpv, 2, "duration", MpvFormat.Double);
+        MpvNative.ObserveProperty(_mpv, 3, "pause", MpvFormat.Flag);
+        MpvNative.ObserveProperty(_mpv, 4, "dwidth", MpvFormat.Int64);
+        MpvNative.ObserveProperty(_mpv, 5, "dheight", MpvFormat.Int64);
 
         _isInitialized = true;
         _eventLoopTask = Task.Run(EventLoop);
@@ -169,7 +161,7 @@ public sealed class VideoPlaybackSession : IDisposable
                 return;
             }
 
-            _ = MpvPlaybackHelper.CommandString(_mpv, command);
+            _ = MpvNative.CommandString(_mpv, command);
         }
     }
 
@@ -185,7 +177,7 @@ public sealed class VideoPlaybackSession : IDisposable
                     return;
                 }
 
-                var eventPtr = MpvPlaybackHelper.WaitEvent(_mpv, 0.1);
+                var eventPtr = MpvNative.WaitEvent(_mpv, 0.1);
                 if (eventPtr == IntPtr.Zero)
                 {
                     continue;
@@ -212,16 +204,9 @@ public sealed class VideoPlaybackSession : IDisposable
     {
         switch (mpvEvent.EventId)
         {
-            case MpvEventId.FileLoaded:
-                break;
             case MpvEventId.VideoReconfig:
             case MpvEventId.PlaybackRestart:
-                if (!_hasShownVideoWindow)
-                {
-                    ShowVideoWindow();
-                    ExecuteCommand("set pause no");
-                }
-
+                _view.RequestRender();
                 break;
             case MpvEventId.PropertyChange:
                 HandlePropertyChange(mpvEvent.ReplyUserData, mpvEvent.Data);
@@ -248,13 +233,7 @@ public sealed class VideoPlaybackSession : IDisposable
         switch (replyUserData)
         {
             case 1 when property.Format == MpvFormat.Double:
-                var positionSeconds = Marshal.PtrToStructure<double>(property.Data);
-                TimeChanged?.Invoke(ToMilliseconds(positionSeconds));
-                if (positionSeconds > 0.01)
-                {
-                    ShowVideoWindow();
-                }
-
+                TimeChanged?.Invoke(ToMilliseconds(Marshal.PtrToStructure<double>(property.Data)));
                 break;
             case 2 when property.Format == MpvFormat.Double:
                 DurationChanged?.Invoke(ToMilliseconds(Marshal.PtrToStructure<double>(property.Data)));
@@ -281,16 +260,16 @@ public sealed class VideoPlaybackSession : IDisposable
         }
     }
 
-    private void ShowVideoWindow()
+    private void ShowVideoSurface()
     {
-        if (_hasShownVideoWindow)
+        if (_hasShownVideoSurface)
         {
             return;
         }
 
-        _hasShownVideoWindow = true;
+        _hasShownVideoSurface = true;
         Playing?.Invoke();
-        _view.ShowPlayerWindow();
+        ExecuteCommand("set pause no");
     }
 
     private void NotifyVideoSizeIfReady()
@@ -332,13 +311,19 @@ public sealed class VideoPlaybackSession : IDisposable
 
     private void DisposeView()
     {
+        void DisposeCore()
+        {
+            _view.FirstFrameRendered -= ShowVideoSurface;
+            _view.Dispose();
+        }
+
         if (_view.Dispatcher.CheckAccess())
         {
-            _view.Dispose();
+            DisposeCore();
         }
         else
         {
-            _view.Dispatcher.BeginInvoke((Action)_view.Dispose);
+            _view.Dispatcher.Invoke(DisposeCore);
         }
     }
 
@@ -436,11 +421,11 @@ public sealed class VideoPlaybackSession : IDisposable
             var cookieHandle = GCHandle.Alloc(cookie);
             var streamInfo = Marshal.PtrToStructure<MpvStreamCbInfo>(info);
             streamInfo.Cookie = GCHandle.ToIntPtr(cookieHandle);
-            streamInfo.Read = MpvPlaybackHelper.ReadStreamCallbackPtr;
-            streamInfo.Seek = MpvPlaybackHelper.SeekStreamCallbackPtr;
-            streamInfo.Size = MpvPlaybackHelper.SizeStreamCallbackPtr;
-            streamInfo.Close = MpvPlaybackHelper.CloseStreamCallbackPtr;
-            streamInfo.Cancel = MpvPlaybackHelper.CancelStreamCallbackPtr;
+            streamInfo.Read = MpvNative.ReadStreamCallbackPtr;
+            streamInfo.Seek = MpvNative.SeekStreamCallbackPtr;
+            streamInfo.Size = MpvNative.SizeStreamCallbackPtr;
+            streamInfo.Close = MpvNative.CloseStreamCallbackPtr;
+            streamInfo.Cancel = MpvNative.CancelStreamCallbackPtr;
             Marshal.StructureToPtr(streamInfo, info, false);
             return 0;
         }
@@ -507,7 +492,7 @@ public sealed class VideoPlaybackSession : IDisposable
         try
         {
             Directory.CreateDirectory(tempDir);
-            mpv = MpvPlaybackHelper.Create();
+            mpv = MpvNative.Create();
             if (mpv == IntPtr.Zero)
             {
                 return null;
@@ -522,9 +507,9 @@ public sealed class VideoPlaybackSession : IDisposable
             SetCoverOption(mpv, "vo-image-outdir", tempDir);
             SetCoverOption(mpv, "frames", "1");
 
-            if (MpvPlaybackHelper.Initialize(mpv) < 0
-                || MpvPlaybackHelper.StreamCbAddRo(mpv, "comic", GCHandle.ToIntPtr(sourceHandle), MpvPlaybackHelper.OpenStreamCallback) < 0
-                || MpvPlaybackHelper.CommandString(mpv, $"loadfile {StreamUri} replace") < 0)
+            if (MpvNative.Initialize(mpv) < 0
+                || MpvNative.StreamCbAddRo(mpv, "comic", GCHandle.ToIntPtr(sourceHandle), MpvNative.OpenStreamCallback) < 0
+                || MpvNative.CommandString(mpv, $"loadfile {StreamUri} replace") < 0)
             {
                 return null;
             }
@@ -533,7 +518,7 @@ public sealed class VideoPlaybackSession : IDisposable
             while (stopwatch.Elapsed < timeout)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var eventPtr = MpvPlaybackHelper.WaitEvent(mpv, 0.1);
+                var eventPtr = MpvNative.WaitEvent(mpv, 0.1);
                 if (eventPtr == IntPtr.Zero)
                 {
                     continue;
@@ -565,7 +550,7 @@ public sealed class VideoPlaybackSession : IDisposable
         {
             if (mpv != IntPtr.Zero)
             {
-                MpvPlaybackHelper.TerminateDestroy(mpv);
+                MpvNative.TerminateDestroy(mpv);
             }
 
             if (sourceHandle.IsAllocated)
@@ -588,10 +573,10 @@ public sealed class VideoPlaybackSession : IDisposable
 
     private static void SetCoverOption(IntPtr mpv, string name, string value)
     {
-        _ = MpvPlaybackHelper.SetOptionString(mpv, name, value);
+        _ = MpvNative.SetOptionString(mpv, name, value);
     }
 
-    private static class MpvPlaybackHelper
+    private static class MpvNative
     {
         public static readonly OpenStreamDelegate OpenStreamCallback = OpenStream;
         public static readonly ReadStreamDelegate ReadStreamCallback = ReadStream;
@@ -640,100 +625,78 @@ public sealed class VideoPlaybackSession : IDisposable
     }
 }
 
-public sealed class MpvVideoHost : HwndHost
+public sealed class MpvOpenGlVideoView : GLWpfControl
 {
-    private const int WsChild = 0x40000000;
-    private const int WsClipSiblings = 0x04000000;
-    private const int WsClipChildren = 0x02000000;
-    private const int SwpNoZOrder = 0x0004;
-    private const int SwpNoActivate = 0x0010;
-    private const int SwShowNoActivate = 4;
+    private const int MpvRenderUpdateFrame = 1;
 
-    private readonly TaskCompletionSource _handleReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly FrameworkElement? _clippingElement;
-    private readonly IntPtr _initialParentHandle;
-    private readonly int _initialWidth;
-    private readonly int _initialHeight;
-    private IntPtr _hwnd;
-    private Rect _lastBounds;
-    private bool _isHosted;
-    private bool _shouldShow;
+    private static readonly MpvOpenGlGetProcAddressDelegate GetProcAddressCallback = GetOpenGlProcAddress;
+    private static readonly IntPtr GetProcAddressCallbackPtr = Marshal.GetFunctionPointerForDelegate(GetProcAddressCallback);
+
+    private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly MpvRenderUpdateDelegate _updateCallback;
+    private readonly IntPtr _framebufferPtr;
+    private readonly IntPtr _flipYPtr;
+    private readonly MpvRenderParam[] _renderParams;
+    private bool _isStarted;
     private bool _isDisposed;
+    private bool _isRendering;
+    private bool _hasRenderedFrame;
+    private bool _forceRender = true;
+    private int _lastFramebuffer;
+    private int _lastWidth;
+    private int _lastHeight;
+    private IntPtr _renderContext;
 
-    public MpvVideoHost(
-        FrameworkElement? clippingElement = null,
-        IntPtr initialParentHandle = default,
-        int initialWidth = 1,
-        int initialHeight = 1)
+    public MpvOpenGlVideoView()
     {
-        _clippingElement = clippingElement;
-        _initialParentHandle = initialParentHandle;
-        _initialWidth = Math.Max(1, initialWidth);
-        _initialHeight = Math.Max(1, initialHeight);
-        if (_clippingElement is not null)
-        {
-            _clippingElement.LayoutUpdated += ClippingElement_LayoutUpdated;
-        }
+        _updateCallback = OnMpvRenderUpdate;
+        _framebufferPtr = Marshal.AllocHGlobal(Marshal.SizeOf<MpvOpenGlFbo>());
+        _flipYPtr = Marshal.AllocHGlobal(sizeof(int));
+        Marshal.WriteInt32(_flipYPtr, 1);
+        _renderParams =
+        [
+            new MpvRenderParam(MpvRenderParamType.OpenGlFbo, _framebufferPtr),
+            new MpvRenderParam(MpvRenderParamType.FlipY, _flipYPtr),
+            new MpvRenderParam(MpvRenderParamType.Invalid, IntPtr.Zero)
+        ];
 
-        EnsurePlayerWindowCreated();
+        Loaded += (_, _) => StartControl();
+        Ready += OnReady;
+        Render += OnRender;
+        HorizontalAlignment = HorizontalAlignment.Stretch;
+        VerticalAlignment = VerticalAlignment.Stretch;
+        Focusable = false;
     }
 
-    public IntPtr PlayerWindowHandle => _hwnd;
+    public event Action? FirstFrameRendered;
 
-    public void ShowPlayerWindow()
+    public Task WaitForReadyAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        StartControl();
+        return _ready.Task.WaitAsync(timeout, cancellationToken);
+    }
+
+    public int InitializeRenderer(IntPtr mpv)
     {
         if (Dispatcher.CheckAccess())
         {
-            ShowPlayerWindowCore();
+            return InitializeRendererCore(mpv);
+        }
+
+        return Dispatcher.Invoke(() => InitializeRendererCore(mpv));
+    }
+
+    public void RequestRender()
+    {
+        _forceRender = true;
+        if (Dispatcher.CheckAccess())
+        {
+            InvalidateVisual();
         }
         else
         {
-            Dispatcher.BeginInvoke((Action)ShowPlayerWindowCore);
+            Dispatcher.BeginInvoke((Action)InvalidateVisual);
         }
-    }
-
-    public Task WaitForHandleAsync(TimeSpan timeout, CancellationToken cancellationToken)
-    {
-        return _handleReady.Task.WaitAsync(timeout, cancellationToken);
-    }
-
-    protected override HandleRef BuildWindowCore(HandleRef hwndParent)
-    {
-        EnsurePlayerWindowCreated(hwndParent.Handle);
-        if (_hwnd != IntPtr.Zero)
-        {
-            SetParent(_hwnd, hwndParent.Handle);
-            _isHosted = true;
-            UpdateWindowPlacement();
-            if (_shouldShow)
-            {
-                ShowPlayerWindowCore();
-            }
-        }
-
-        return new HandleRef(this, _hwnd);
-    }
-
-    private void ShowPlayerWindowCore()
-    {
-        _shouldShow = true;
-        if (_hwnd != IntPtr.Zero && _isHosted)
-        {
-            UpdateWindowPlacement();
-            ShowWindow(_hwnd, SwShowNoActivate);
-        }
-    }
-
-    protected override void OnWindowPositionChanged(Rect rcBoundingBox)
-    {
-        base.OnWindowPositionChanged(rcBoundingBox);
-        _lastBounds = rcBoundingBox;
-        UpdateWindowPlacement();
-    }
-
-    protected override void DestroyWindowCore(HandleRef hwnd)
-    {
-        _isHosted = false;
     }
 
     public new void Dispose()
@@ -744,176 +707,221 @@ public sealed class MpvVideoHost : HwndHost
         }
 
         _isDisposed = true;
-        if (_clippingElement is not null)
+        Render -= OnRender;
+        Ready -= OnReady;
+
+        if (Dispatcher.CheckAccess())
         {
-            _clippingElement.LayoutUpdated -= ClippingElement_LayoutUpdated;
-        }
-
-        DestroyPlayerWindow();
-        base.Dispose();
-    }
-
-    private void ClippingElement_LayoutUpdated(object? sender, EventArgs e)
-    {
-        UpdateWindowPlacement();
-    }
-
-    private void UpdateWindowPlacement()
-    {
-        if (_hwnd == IntPtr.Zero || _lastBounds.IsEmpty)
-        {
-            return;
-        }
-
-        SetWindowPos(
-            _hwnd,
-            IntPtr.Zero,
-            (int)Math.Round(_lastBounds.X),
-            (int)Math.Round(_lastBounds.Y),
-            Math.Max(1, (int)Math.Round(_lastBounds.Width)),
-            Math.Max(1, (int)Math.Round(_lastBounds.Height)),
-            SwpNoZOrder | SwpNoActivate);
-        UpdateClipRegion();
-    }
-
-    private void EnsurePlayerWindowCreated(IntPtr parentHandle = default)
-    {
-        if (_hwnd != IntPtr.Zero)
-        {
-            return;
-        }
-
-        var parent = parentHandle != IntPtr.Zero ? parentHandle : _initialParentHandle;
-        _hwnd = CreateWindowEx(
-            0,
-            "static",
-            "",
-            WsChild | WsClipSiblings | WsClipChildren,
-            -32000,
-            -32000,
-            _initialWidth,
-            _initialHeight,
-            parent,
-            IntPtr.Zero,
-            IntPtr.Zero,
-            IntPtr.Zero);
-        if (_hwnd != IntPtr.Zero)
-        {
-            _handleReady.TrySetResult();
-        }
-    }
-
-    private void DestroyPlayerWindow()
-    {
-        if (_hwnd != IntPtr.Zero)
-        {
-            DestroyWindow(_hwnd);
-            _hwnd = IntPtr.Zero;
-        }
-    }
-
-    private void UpdateClipRegion()
-    {
-        var clipBounds = GetClipBounds();
-        if (clipBounds is null)
-        {
-            SetWindowRgn(_hwnd, IntPtr.Zero, true);
-            return;
-        }
-
-        var visibleBounds = Rect.Intersect(_lastBounds, clipBounds.Value);
-        IntPtr region;
-        if (visibleBounds.IsEmpty)
-        {
-            region = CreateRectRgn(0, 0, 0, 0);
+            DisposeRendererCore();
         }
         else
         {
-            region = CreateRectRgn(
-                Math.Max(0, (int)Math.Floor(visibleBounds.X - _lastBounds.X)),
-                Math.Max(0, (int)Math.Floor(visibleBounds.Y - _lastBounds.Y)),
-                Math.Max(0, (int)Math.Ceiling(visibleBounds.Right - _lastBounds.X)),
-                Math.Max(0, (int)Math.Ceiling(visibleBounds.Bottom - _lastBounds.Y)));
+            Dispatcher.Invoke(DisposeRendererCore);
         }
 
-        if (SetWindowRgn(_hwnd, region, true) == 0)
-        {
-            DeleteObject(region);
-        }
+        Marshal.FreeHGlobal(_framebufferPtr);
+        Marshal.FreeHGlobal(_flipYPtr);
+        base.Dispose();
     }
 
-    private Rect? GetClipBounds()
+    private void StartControl()
     {
-        if (_clippingElement is null
-            || !IsVisible
-            || !_clippingElement.IsVisible
-            || ActualWidth <= 0
-            || ActualHeight <= 0
-            || _clippingElement.ActualWidth <= 0
-            || _clippingElement.ActualHeight <= 0)
+        if (_isStarted || _isDisposed)
         {
-            return null;
+            return;
         }
 
-        var source = PresentationSource.FromVisual(this);
-        if (source?.RootVisual is not Visual root)
+        _isStarted = true;
+        Start(new GLWpfControlSettings
         {
-            return null;
+            MajorVersion = 3,
+            MinorVersion = 3,
+            RenderContinuously = false,
+            UseDeviceDpi = true,
+            TransparentBackground = true
+        });
+    }
+
+    private void OnReady()
+    {
+        if (!TryMakeCurrent())
+        {
+            return;
         }
 
+        GL.ClearColor(0f, 0f, 0f, 0f);
+        GL.Clear(ClearBufferMask.ColorBufferBit);
+        _ready.TrySetResult();
+    }
+
+    private int InitializeRendererCore(IntPtr mpv)
+    {
+        if (_renderContext != IntPtr.Zero)
+        {
+            return 0;
+        }
+
+        StartControl();
+        if (!_ready.Task.IsCompletedSuccessfully)
+        {
+            throw new InvalidOperationException("OpenGL 控件尚未准备好。");
+        }
+
+        if (!TryMakeCurrent())
+        {
+            throw new InvalidOperationException("OpenGL context 尚未准备好。");
+        }
+
+        var apiTypePtr = Marshal.StringToHGlobalAnsi("opengl");
+        var initParams = new MpvOpenGlInitParams(GetProcAddressCallbackPtr, IntPtr.Zero);
+        var initParamsPtr = Marshal.AllocHGlobal(Marshal.SizeOf<MpvOpenGlInitParams>());
         try
         {
-            return _clippingElement.TransformToAncestor(root)
-                .TransformBounds(new Rect(0, 0, _clippingElement.ActualWidth, _clippingElement.ActualHeight));
+            Marshal.StructureToPtr(initParams, initParamsPtr, false);
+            var createParams = new[]
+            {
+                new MpvRenderParam(MpvRenderParamType.ApiType, apiTypePtr),
+                new MpvRenderParam(MpvRenderParamType.OpenGlInitParams, initParamsPtr),
+                new MpvRenderParam(MpvRenderParamType.Invalid, IntPtr.Zero)
+            };
+
+            var result = MpvRenderNative.RenderContextCreate(out _renderContext, mpv, createParams);
+            if (result < 0)
+            {
+                _renderContext = IntPtr.Zero;
+                return result;
+            }
+
+            MpvRenderNative.RenderContextSetUpdateCallback(_renderContext, _updateCallback, IntPtr.Zero);
+            RequestRender();
+            return 0;
         }
-        catch (InvalidOperationException)
+        finally
         {
-            return null;
+            Marshal.FreeHGlobal(initParamsPtr);
+            Marshal.FreeHGlobal(apiTypePtr);
         }
     }
 
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern IntPtr CreateWindowEx(
-        int dwExStyle,
-        string lpClassName,
-        string lpWindowName,
-        int dwStyle,
-        int x,
-        int y,
-        int nWidth,
-        int nHeight,
-        IntPtr hWndParent,
-        IntPtr hMenu,
-        IntPtr hInstance,
-        IntPtr lpParam);
+    private void OnMpvRenderUpdate(IntPtr callbackContext)
+    {
+        RequestRender();
+    }
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool DestroyWindow(IntPtr hwnd);
+    private void OnRender(TimeSpan delta)
+    {
+        if (_isDisposed || _isRendering)
+        {
+            return;
+        }
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern IntPtr SetParent(IntPtr hwndChild, IntPtr hwndNewParent);
+        _isRendering = true;
+        try
+        {
+            if (!TryMakeCurrent())
+            {
+                return;
+            }
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool SetWindowPos(
-        IntPtr hwnd,
-        IntPtr hwndInsertAfter,
-        int x,
-        int y,
-        int cx,
-        int cy,
-        int flags);
+            GL.BindFramebuffer(FramebufferTarget.Framebuffer, Framebuffer);
+            GL.Viewport(0, 0, Math.Max(1, FrameBufferWidth), Math.Max(1, FrameBufferHeight));
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool ShowWindow(IntPtr hwnd, int command);
+            if (_renderContext == IntPtr.Zero)
+            {
+                GL.Clear(ClearBufferMask.ColorBufferBit);
+                GL.Flush();
+                return;
+            }
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern int SetWindowRgn(IntPtr hwnd, IntPtr region, bool redraw);
+            var updateFlags = MpvRenderNative.RenderContextUpdate(_renderContext);
+            var framebufferChanged = Framebuffer != _lastFramebuffer
+                || FrameBufferWidth != _lastWidth
+                || FrameBufferHeight != _lastHeight;
+            if ((updateFlags & MpvRenderUpdateFrame) == 0 && !_forceRender && !framebufferChanged)
+            {
+                return;
+            }
 
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern IntPtr CreateRectRgn(int left, int top, int right, int bottom);
+            _lastFramebuffer = Framebuffer;
+            _lastWidth = FrameBufferWidth;
+            _lastHeight = FrameBufferHeight;
 
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern bool DeleteObject(IntPtr handle);
+            var fbo = new MpvOpenGlFbo(
+                Framebuffer,
+                Math.Max(1, FrameBufferWidth),
+                Math.Max(1, FrameBufferHeight),
+                0);
+            Marshal.StructureToPtr(fbo, _framebufferPtr, false);
+
+            MpvRenderNative.RenderContextRender(_renderContext, _renderParams);
+            MpvRenderNative.RenderContextReportSwap(_renderContext);
+            GL.Flush();
+            _forceRender = false;
+
+            if (!_hasRenderedFrame)
+            {
+                _hasRenderedFrame = true;
+                FirstFrameRendered?.Invoke();
+            }
+        }
+        finally
+        {
+            _isRendering = false;
+        }
+    }
+
+    private void DisposeRendererCore()
+    {
+        if (_renderContext != IntPtr.Zero)
+        {
+            if (!TryMakeCurrent())
+            {
+                return;
+            }
+
+            MpvRenderNative.RenderContextSetUpdateCallback(_renderContext, null, IntPtr.Zero);
+            MpvRenderNative.RenderContextFree(_renderContext);
+            _renderContext = IntPtr.Zero;
+        }
+    }
+
+    private bool TryMakeCurrent()
+    {
+        if (Context is null)
+        {
+            return false;
+        }
+
+        Context.MakeCurrent();
+        return true;
+    }
+
+    private static IntPtr GetOpenGlProcAddress(IntPtr context, IntPtr name)
+    {
+        var procName = Marshal.PtrToStringAnsi(name);
+        if (string.IsNullOrWhiteSpace(procName))
+        {
+            return IntPtr.Zero;
+        }
+
+        var address = WglGetProcAddress(procName);
+        if (address != IntPtr.Zero && address.ToInt64() > 3)
+        {
+            return address;
+        }
+
+        var module = GetModuleHandle("opengl32.dll");
+        return module == IntPtr.Zero ? IntPtr.Zero : GetProcAddress(module, procName);
+    }
+
+    [DllImport("opengl32.dll", EntryPoint = "wglGetProcAddress", CharSet = CharSet.Ansi, SetLastError = true)]
+    private static extern IntPtr WglGetProcAddress(string name);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetModuleHandleW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr GetModuleHandle(string moduleName);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetProcAddress", CharSet = CharSet.Ansi, SetLastError = true)]
+    private static extern IntPtr GetProcAddress(IntPtr module, string procName);
 }
 
 public enum MpvFormat
@@ -968,6 +976,15 @@ public enum MpvEndFileReason
     Redirect = 5
 }
 
+public enum MpvRenderParamType
+{
+    Invalid = 0,
+    ApiType = 1,
+    OpenGlInitParams = 2,
+    OpenGlFbo = 3,
+    FlipY = 4
+}
+
 [StructLayout(LayoutKind.Sequential)]
 public struct MpvEvent
 {
@@ -1006,6 +1023,49 @@ public struct MpvStreamCbInfo
     public IntPtr Cancel;
 }
 
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct MpvOpenGlInitParams
+{
+    public MpvOpenGlInitParams(IntPtr getProcAddress, IntPtr getProcAddressContext)
+    {
+        GetProcAddress = getProcAddress;
+        GetProcAddressContext = getProcAddressContext;
+    }
+
+    public readonly IntPtr GetProcAddress;
+    public readonly IntPtr GetProcAddressContext;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct MpvOpenGlFbo
+{
+    public MpvOpenGlFbo(int framebuffer, int width, int height, int internalFormat)
+    {
+        Framebuffer = framebuffer;
+        Width = width;
+        Height = height;
+        InternalFormat = internalFormat;
+    }
+
+    public readonly int Framebuffer;
+    public readonly int Width;
+    public readonly int Height;
+    public readonly int InternalFormat;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct MpvRenderParam
+{
+    public MpvRenderParam(MpvRenderParamType type, IntPtr data)
+    {
+        Type = type;
+        Data = data;
+    }
+
+    public readonly MpvRenderParamType Type;
+    public readonly IntPtr Data;
+}
+
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 public delegate int OpenStreamDelegate(IntPtr userData, IntPtr uri, IntPtr info);
 
@@ -1024,3 +1084,29 @@ public delegate void CloseStreamDelegate(IntPtr cookie);
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 public delegate void CancelStreamDelegate(IntPtr cookie);
 
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+public delegate IntPtr MpvOpenGlGetProcAddressDelegate(IntPtr context, IntPtr name);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+public delegate void MpvRenderUpdateDelegate(IntPtr callbackContext);
+
+public static class MpvRenderNative
+{
+    [DllImport("libmpv-2.dll", CallingConvention = CallingConvention.Cdecl, EntryPoint = "mpv_render_context_create")]
+    public static extern int RenderContextCreate(out IntPtr context, IntPtr handle, [In] MpvRenderParam[] parameters);
+
+    [DllImport("libmpv-2.dll", CallingConvention = CallingConvention.Cdecl, EntryPoint = "mpv_render_context_set_update_callback")]
+    public static extern void RenderContextSetUpdateCallback(IntPtr context, MpvRenderUpdateDelegate? callback, IntPtr callbackContext);
+
+    [DllImport("libmpv-2.dll", CallingConvention = CallingConvention.Cdecl, EntryPoint = "mpv_render_context_update")]
+    public static extern ulong RenderContextUpdate(IntPtr context);
+
+    [DllImport("libmpv-2.dll", CallingConvention = CallingConvention.Cdecl, EntryPoint = "mpv_render_context_render")]
+    public static extern int RenderContextRender(IntPtr context, [In] MpvRenderParam[] parameters);
+
+    [DllImport("libmpv-2.dll", CallingConvention = CallingConvention.Cdecl, EntryPoint = "mpv_render_context_report_swap")]
+    public static extern void RenderContextReportSwap(IntPtr context);
+
+    [DllImport("libmpv-2.dll", CallingConvention = CallingConvention.Cdecl, EntryPoint = "mpv_render_context_free")]
+    public static extern void RenderContextFree(IntPtr context);
+}
