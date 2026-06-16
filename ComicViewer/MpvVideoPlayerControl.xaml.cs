@@ -84,6 +84,14 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
         return VideoView.WaitForReadyAsync(timeout, cancellationToken);
     }
 
+    public void BeginPreparing()
+    {
+        ThrowIfDisposed();
+        IsPreparing = true;
+        IsPlaying = false;
+        IsPaused = false;
+    }
+
     public async Task PlayAsync(CancellationToken cancellationToken = default)
     {
         await WaitForHostReadyAsync(TimeSpan.FromSeconds(2), cancellationToken);
@@ -106,8 +114,7 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
     {
         ThrowIfDisposed();
         var engine = EnsureEngine();
-        IsPreparing = true;
-        IsPaused = false;
+        BeginPreparing();
         engine.Play();
     }
 
@@ -118,6 +125,7 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
             return;
         }
 
+        IsPaused = true;
         _engine.Pause();
     }
 
@@ -128,6 +136,9 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
             return;
         }
 
+        IsPreparing = false;
+        IsPlaying = true;
+        IsPaused = false;
         _engine.Resume();
     }
 

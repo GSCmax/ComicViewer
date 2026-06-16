@@ -16,9 +16,6 @@ public sealed class ComicPage : INotifyPropertyChanged
     private BitmapImage? _image;
     private MpvVideoPlayerControl? _videoPlayer;
     private ImageSource? _videoFrame;
-    private bool _isVideoPaused;
-    private bool _isVideoPreparing;
-    private bool _isVideoPlaying;
     private long _videoPositionMs;
     private long _videoDurationMs;
     private double _aspectRatio;
@@ -50,8 +47,6 @@ public sealed class ComicPage : INotifyPropertyChanged
 
     public bool IsVideo => MediaType == ComicMediaType.Video;
 
-    public bool IsImageLoaded => Image is not null;
-
     public bool IsLoaded => IsImage ? Image is not null : VideoFrame is not null;
 
     public ArraySegment<byte>? EncodedImageData => _encodedImageData;
@@ -79,7 +74,6 @@ public sealed class ComicPage : INotifyPropertyChanged
             {
                 _image = value;
                 OnPropertyChanged();
-                OnPropertyChanged(nameof(IsImageLoaded));
                 OnPropertyChanged(nameof(IsLoaded));
             }
         }
@@ -99,52 +93,11 @@ public sealed class ComicPage : INotifyPropertyChanged
         }
     }
 
-    public bool IsVideoPlaying
-    {
-        get => _isVideoPlaying;
-        set
-        {
-            if (_isVideoPlaying != value)
-            {
-                _isVideoPlaying = value;
-                OnPropertyChanged();
-                OnPropertyChanged(nameof(VideoOverlayText));
-                OnPropertyChanged(nameof(IsPlaybackHostVisible));
-                OnPropertyChanged(nameof(PlaybackHostWidth));
-                OnPropertyChanged(nameof(PlaybackHostHeight));
-            }
-        }
-    }
+    public bool IsVideoPlaying => _videoPlayer?.IsPlaying == true;
 
-    public bool IsVideoPreparing
-    {
-        get => _isVideoPreparing;
-        set
-        {
-            if (_isVideoPreparing != value)
-            {
-                _isVideoPreparing = value;
-                OnPropertyChanged();
-                OnPropertyChanged(nameof(IsPlaybackHostVisible));
-                OnPropertyChanged(nameof(PlaybackHostWidth));
-                OnPropertyChanged(nameof(PlaybackHostHeight));
-                OnPropertyChanged(nameof(VideoOverlayText));
-            }
-        }
-    }
+    public bool IsVideoPreparing => _videoPlayer?.IsPreparing == true;
 
-    public bool IsVideoPaused
-    {
-        get => _isVideoPaused;
-        set
-        {
-            if (_isVideoPaused != value)
-            {
-                _isVideoPaused = value;
-                OnPropertyChanged();
-            }
-        }
-    }
+    public bool IsVideoPaused => _videoPlayer?.IsPaused == true;
 
     public string VideoTimeText => IsVideo
         ? $"{FormatVideoTime(_videoPositionMs)}/{FormatVideoTime(_videoDurationMs)}"
@@ -260,6 +213,7 @@ public sealed class ComicPage : INotifyPropertyChanged
     {
         _videoPlayer = player;
         OnPropertyChanged(nameof(PlaybackElement));
+        NotifyPlaybackStateChanged();
     }
 
     public void PauseVideo()
@@ -270,7 +224,7 @@ public sealed class ComicPage : INotifyPropertyChanged
         }
 
         _videoPlayer.Pause();
-        IsVideoPaused = true;
+        NotifyPlaybackStateChanged();
     }
 
     public void ResumeVideo()
@@ -281,8 +235,7 @@ public sealed class ComicPage : INotifyPropertyChanged
         }
 
         _videoPlayer.Resume();
-        IsVideoPlaying = true;
-        IsVideoPaused = false;
+        NotifyPlaybackStateChanged();
     }
 
     public void SetVideoPosition(long positionMs)
@@ -318,13 +271,11 @@ public sealed class ComicPage : INotifyPropertyChanged
 
     public void StopVideo()
     {
-        IsVideoPlaying = false;
-        IsVideoPaused = false;
         SetVideoPosition(0);
-        IsVideoPreparing = false;
-        DisposePlayerInBackground(_videoPlayer, stopFirst: true);
+        DisposePlayerInBackground(_videoPlayer);
         _videoPlayer = null;
         OnPropertyChanged(nameof(PlaybackElement));
+        NotifyPlaybackStateChanged();
     }
 
     public void Resize(double pageWidth)
@@ -340,6 +291,17 @@ public sealed class ComicPage : INotifyPropertyChanged
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
     }
 
+    public void NotifyPlaybackStateChanged()
+    {
+        OnPropertyChanged(nameof(IsVideoPlaying));
+        OnPropertyChanged(nameof(IsVideoPreparing));
+        OnPropertyChanged(nameof(IsVideoPaused));
+        OnPropertyChanged(nameof(IsPlaybackHostVisible));
+        OnPropertyChanged(nameof(PlaybackHostWidth));
+        OnPropertyChanged(nameof(PlaybackHostHeight));
+        OnPropertyChanged(nameof(VideoOverlayText));
+    }
+
     private static string FormatVideoTime(long milliseconds)
     {
         var time = TimeSpan.FromMilliseconds(Math.Max(0, milliseconds));
@@ -348,7 +310,7 @@ public sealed class ComicPage : INotifyPropertyChanged
             : time.ToString(@"m\:ss", CultureInfo.InvariantCulture);
     }
 
-    private static void DisposePlayerInBackground(MpvVideoPlayerControl? player, bool stopFirst)
+    private static void DisposePlayerInBackground(MpvVideoPlayerControl? player)
     {
         if (player is null)
         {
@@ -359,11 +321,7 @@ public sealed class ComicPage : INotifyPropertyChanged
         {
             try
             {
-                if (stopFirst)
-                {
-                    player.Stop();
-                }
-
+                player.Stop();
                 player.Dispose();
             }
             catch

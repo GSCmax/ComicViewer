@@ -106,8 +106,8 @@ public partial class MainWindow
             page.SetVideoPlayer(player);
             assignedToPage = true;
             AttachPlaybackEvents(page, player);
-            page.IsVideoPreparing = true;
-            page.IsVideoPaused = false;
+            player.BeginPreparing();
+            page.NotifyPlaybackStateChanged();
             ReleaseMouseInputCapture();
 
             await Dispatcher.InvokeAsync(() => PagesListBox.UpdateLayout());
@@ -198,9 +198,7 @@ public partial class MainWindow
         {
             if (page.VideoPlayer == player)
             {
-                page.IsVideoPreparing = false;
-                page.IsVideoPlaying = true;
-                page.IsVideoPaused = false;
+                page.NotifyPlaybackStateChanged();
                 StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - 正在播放";
             }
         }));
@@ -209,7 +207,7 @@ public partial class MainWindow
         {
             if (page.VideoPlayer == player)
             {
-                page.IsVideoPaused = true;
+                page.NotifyPlaybackStateChanged();
                 StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - 已暂停";
             }
         }));

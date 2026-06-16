@@ -16,6 +16,4 @@ internal sealed record KnownPasswordResult(string Password, ArchiveSession Sessi
 internal sealed record MediaLoadRequest(
     int PageIndex,
     ComicPage Page,
-    string EntryKey,
-    ComicMediaType Type,
     long ReservedBytes);

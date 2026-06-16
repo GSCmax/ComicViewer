@@ -93,14 +93,15 @@ public partial class MainWindow
         try
         {
             var session = _archiveSession;
+            var requestedPage = request.Page;
             if (session is null)
             {
                 return;
             }
 
-            if (request.Type == ComicMediaType.Image)
+            if (requestedPage.IsImage)
             {
-                using var encodedImage = session.CopyEntryToMemory(request.EntryKey, cancellationToken, MaxMediaCacheBytes);
+                using var encodedImage = session.CopyEntryToMemory(requestedPage.EntryKey, cancellationToken, MaxMediaCacheBytes);
                 var imageData = TakeMemorySegment(encodedImage);
                 await Dispatcher.InvokeAsync(
                     () => AcceptImage(request, imageData, generation),
@@ -113,12 +114,12 @@ public partial class MainWindow
                 {
                     if (IsFreshRequest(request, generation))
                     {
-                        request.Page.SetCoverLoadStatus(VideoCoverLoadStatus.Loading);
+                        requestedPage.SetCoverLoadStatus(VideoCoverLoadStatus.Loading);
                     }
                 },
                 System.Windows.Threading.DispatcherPriority.Background);
 
-            using var encodedMedia = session.CopyEntryToMemory(request.EntryKey, cancellationToken, MaxMediaCacheBytes);
+            using var encodedMedia = session.CopyEntryToMemory(requestedPage.EntryKey, cancellationToken, MaxMediaCacheBytes);
             var videoData = TakeMemorySegment(encodedMedia);
             var coverFrame = await TryRenderVideoCoverFrameAsync(videoData, cancellationToken);
             await Dispatcher.InvokeAsync(
@@ -139,12 +140,12 @@ public partial class MainWindow
                 }
 
                 FinishFailedRequest(request);
-                if (request.Type == ComicMediaType.Video)
+                if (request.Page.IsVideo)
                 {
                     request.Page.SetCoverLoadStatus(VideoCoverLoadStatus.Failed);
                 }
 
-                StatusTextBlock.Text = $"{(request.Type == ComicMediaType.Image ? "图片" : "视频")}加载失败: {Path.GetFileName(request.EntryKey)} - {ex.Message}";
+                StatusTextBlock.Text = $"{(request.Page.IsImage ? "图片" : "视频")}加载失败: {Path.GetFileName(request.Page.EntryKey)} - {ex.Message}";
             }, System.Windows.Threading.DispatcherPriority.Background);
         }
     }
@@ -198,7 +199,7 @@ public partial class MainWindow
 
                 _loadsInFlight.Add(page.EntryKey);
                 _reservedCacheBytes += reservedBytes;
-                return new MediaLoadRequest(index, page, page.EntryKey, page.MediaType, reservedBytes);
+                return new MediaLoadRequest(index, page, reservedBytes);
             }
         }
 
@@ -214,7 +215,7 @@ public partial class MainWindow
         }
 
         var page = Pages[request.PageIndex];
-        StoreCachedMedia(new CachedMedia(request.EntryKey, request.PageIndex, request.Type, imageData, null, null, imageData.Count), request);
+        StoreCachedMedia(new CachedMedia(page.EntryKey, request.PageIndex, page.MediaType, imageData, null, null, imageData.Count), request);
         page.SetEncodedImageData(imageData);
         DecodeVisibleImages();
         EvictMediaOverBudget();
@@ -230,7 +231,7 @@ public partial class MainWindow
         }
 
         var page = Pages[request.PageIndex];
-        StoreCachedMedia(new CachedMedia(request.EntryKey, request.PageIndex, request.Type, null, videoData, coverFrame, videoData.Count), request);
+        StoreCachedMedia(new CachedMedia(page.EntryKey, request.PageIndex, page.MediaType, null, videoData, coverFrame, videoData.Count), request);
         if (coverFrame is not null && !page.IsVideoPlaying)
         {
             page.SetVideoFrame(coverFrame);
@@ -250,21 +251,21 @@ public partial class MainWindow
         return generation == _cacheGeneration
             && request.PageIndex >= 0
             && request.PageIndex < Pages.Count
-            && string.Equals(Pages[request.PageIndex].EntryKey, request.EntryKey, StringComparison.Ordinal);
+            && string.Equals(Pages[request.PageIndex].EntryKey, request.Page.EntryKey, StringComparison.Ordinal);
     }
 
     private void StoreCachedMedia(CachedMedia media, MediaLoadRequest request)
     {
         lock (_cacheLock)
         {
-            _loadsInFlight.Remove(request.EntryKey);
+            _loadsInFlight.Remove(request.Page.EntryKey);
             _reservedCacheBytes = Math.Max(0, _reservedCacheBytes - request.ReservedBytes);
-            if (_mediaCache.Remove(request.EntryKey, out var oldMedia))
+            if (_mediaCache.Remove(request.Page.EntryKey, out var oldMedia))
             {
                 _cacheBytes -= oldMedia.EstimatedBytes;
             }
 
-            _mediaCache[request.EntryKey] = media;
+            _mediaCache[request.Page.EntryKey] = media;
             _cacheBytes += media.EstimatedBytes;
         }
     }
@@ -273,9 +274,9 @@ public partial class MainWindow
     {
         lock (_cacheLock)
         {
-            _loadsInFlight.Remove(request.EntryKey);
+            _loadsInFlight.Remove(request.Page.EntryKey);
             _reservedCacheBytes = Math.Max(0, _reservedCacheBytes - request.ReservedBytes);
-            _failedMedia.Add(request.EntryKey);
+            _failedMedia.Add(request.Page.EntryKey);
         }
     }
 
@@ -283,7 +284,7 @@ public partial class MainWindow
     {
         lock (_cacheLock)
         {
-            _loadsInFlight.Remove(request.EntryKey);
+            _loadsInFlight.Remove(request.Page.EntryKey);
             _reservedCacheBytes = Math.Max(0, _reservedCacheBytes - request.ReservedBytes);
         }
     }
