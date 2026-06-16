@@ -228,6 +228,14 @@ public partial class MainWindow
             }
         }));
 
+        player.FirstFrameRendered += () => Dispatcher.BeginInvoke((Action)(() =>
+        {
+            if (page.VideoPlayer == player)
+            {
+                page.NotifyPlaybackStateChanged();
+            }
+        }));
+
         player.TimeChanged += positionMs => Dispatcher.BeginInvoke((Action)(() =>
         {
             if (page.VideoPlayer == player)

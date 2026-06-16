@@ -89,6 +89,7 @@ public sealed class ComicPage : INotifyPropertyChanged
                 _videoFrame = value;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(IsLoaded));
+                OnPropertyChanged(nameof(ShouldShowVideoFrame));
             }
         }
     }
@@ -98,6 +99,8 @@ public sealed class ComicPage : INotifyPropertyChanged
     public bool IsVideoPreparing => _videoPlayer?.IsPreparing == true;
 
     public bool IsVideoPaused => _videoPlayer?.IsPaused == true;
+
+    public bool ShouldShowVideoFrame => VideoFrame is not null && _videoPlayer?.HasRenderedFirstFrame != true;
 
     public string VideoTimeText => IsVideo
         ? $"{FormatVideoTime(_videoPositionMs)}/{FormatVideoTime(_videoDurationMs)}"
@@ -300,6 +303,7 @@ public sealed class ComicPage : INotifyPropertyChanged
         OnPropertyChanged(nameof(PlaybackHostWidth));
         OnPropertyChanged(nameof(PlaybackHostHeight));
         OnPropertyChanged(nameof(VideoOverlayText));
+        OnPropertyChanged(nameof(ShouldShowVideoFrame));
     }
 
     private static string FormatVideoTime(long milliseconds)

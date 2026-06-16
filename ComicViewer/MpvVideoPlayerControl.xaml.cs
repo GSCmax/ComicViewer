@@ -37,6 +37,7 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
     public event Action<long>? DurationChanged;
     public event Action<long>? TimeChanged;
     public event Action<long, long>? VideoSizeChanged;
+    public event Action? FirstFrameRendered;
     public event Action? EndReached;
     public event Action? PlaybackError;
 
@@ -45,6 +46,8 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
     public bool IsPaused { get; private set; }
 
     public bool IsPreparing { get; private set; }
+
+    public bool HasRenderedFirstFrame { get; private set; }
 
     public byte[]? SourceBytes
     {
@@ -90,6 +93,7 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
         IsPreparing = true;
         IsPlaying = false;
         IsPaused = false;
+        HasRenderedFirstFrame = false;
     }
 
     public async Task PlayAsync(CancellationToken cancellationToken = default)
@@ -228,6 +232,7 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
         engine.DurationChanged += Engine_DurationChanged;
         engine.TimeChanged += Engine_TimeChanged;
         engine.VideoSizeChanged += Engine_VideoSizeChanged;
+        engine.FirstFrameRendered += Engine_FirstFrameRendered;
         engine.EndReached += Engine_EndReached;
         engine.PlaybackError += Engine_PlaybackError;
     }
@@ -239,6 +244,7 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
         engine.DurationChanged -= Engine_DurationChanged;
         engine.TimeChanged -= Engine_TimeChanged;
         engine.VideoSizeChanged -= Engine_VideoSizeChanged;
+        engine.FirstFrameRendered -= Engine_FirstFrameRendered;
         engine.EndReached -= Engine_EndReached;
         engine.PlaybackError -= Engine_PlaybackError;
     }
@@ -278,6 +284,15 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
         RunOnUiThread(() => VideoSizeChanged?.Invoke(width, height));
     }
 
+    private void Engine_FirstFrameRendered()
+    {
+        RunOnUiThread(() =>
+        {
+            HasRenderedFirstFrame = true;
+            FirstFrameRendered?.Invoke();
+        });
+    }
+
     private void Engine_EndReached()
     {
         RunOnUiThread(() =>
@@ -313,6 +328,7 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
         IsPreparing = false;
         IsPlaying = false;
         IsPaused = false;
+        HasRenderedFirstFrame = false;
     }
 
     private void ThrowIfDisposed()
@@ -362,6 +378,7 @@ internal sealed class MpvVideoPlaybackEngine : IDisposable
     public event Action<long>? DurationChanged;
     public event Action<long>? TimeChanged;
     public event Action<long, long>? VideoSizeChanged;
+    public event Action? FirstFrameRendered;
     public event Action? EndReached;
     public event Action? PlaybackError;
 
@@ -579,7 +596,7 @@ internal sealed class MpvVideoPlaybackEngine : IDisposable
         }
 
         _hasShownVideoSurface = true;
-        Playing?.Invoke();
+        FirstFrameRendered?.Invoke();
         Task.Run(() => ExecuteCommand("set pause no"));
     }
 
@@ -1177,10 +1194,11 @@ public sealed class MpvOpenGlVideoView : GLWpfControl
             }
 
             var updateFlags = MpvRenderNative.RenderContextUpdate(_renderContext);
+            var hasFrameUpdate = (updateFlags & MpvRenderUpdateFrame) != 0;
             var framebufferChanged = Framebuffer != _lastFramebuffer
                 || FrameBufferWidth != _lastWidth
                 || FrameBufferHeight != _lastHeight;
-            if ((updateFlags & MpvRenderUpdateFrame) == 0 && !_forceRender && !framebufferChanged)
+            if (!hasFrameUpdate && !_forceRender && !framebufferChanged)
             {
                 return;
             }
@@ -1200,7 +1218,7 @@ public sealed class MpvOpenGlVideoView : GLWpfControl
             MpvRenderNative.RenderContextReportSwap(_renderContext);
             _forceRender = false;
 
-            if (!_hasRenderedFrame)
+            if (!_hasRenderedFrame && hasFrameUpdate)
             {
                 _hasRenderedFrame = true;
                 FirstFrameRendered?.Invoke();
