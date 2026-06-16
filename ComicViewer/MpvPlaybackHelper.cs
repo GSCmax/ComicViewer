@@ -1,7 +1,10 @@
+using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
+using System.Windows.Media;
 
 namespace ComicViewer;
 
@@ -11,14 +14,24 @@ public sealed class VideoPlaybackSession : IDisposable
 
     private readonly ArraySegment<byte> _videoData;
     private readonly object _mpvLock = new();
-    private readonly MpvVideoHost _view = new();
+    private readonly MpvVideoHost _view;
     private readonly GCHandle _streamUserDataHandle;
     private IntPtr _mpv;
     private Task? _eventLoopTask;
+    private long _displayWidth;
+    private long _displayHeight;
+    private bool _hasShownVideoWindow;
     private bool _isInitialized;
     private bool _isDisposed;
 
-    public VideoPlaybackSession(ArraySegment<byte> videoData)
+    private ArraySegment<byte> VideoData => _videoData;
+
+    public VideoPlaybackSession(
+        ArraySegment<byte> videoData,
+        FrameworkElement? clippingElement = null,
+        IntPtr initialParentHandle = default,
+        int initialWidth = 1,
+        int initialHeight = 1)
     {
         if (videoData.Array is null)
         {
@@ -26,6 +39,7 @@ public sealed class VideoPlaybackSession : IDisposable
         }
 
         _videoData = videoData;
+        _view = new MpvVideoHost(clippingElement, initialParentHandle, initialWidth, initialHeight);
         _streamUserDataHandle = GCHandle.Alloc(this);
         _mpv = MpvPlaybackHelper.Create();
         MpvPlaybackHelper.Check(_mpv != IntPtr.Zero ? 0 : -1, "创建 mpv 播放器失败。");
@@ -35,10 +49,19 @@ public sealed class VideoPlaybackSession : IDisposable
     public event Action? Paused;
     public event Action<long>? DurationChanged;
     public event Action<long>? TimeChanged;
+    public event Action<long, long>? VideoSizeChanged;
     public event Action? EndReached;
     public event Action? PlaybackError;
 
     public FrameworkElement View => _view;
+
+    public static Task<ArraySegment<byte>?> TryRenderFirstFramePngAsync(
+        ArraySegment<byte> videoData,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        return Task.Run(() => TryRenderFirstFramePng(videoData, timeout, cancellationToken), cancellationToken);
+    }
 
     public Task WaitForHostReadyAsync(TimeSpan timeout, CancellationToken cancellationToken)
     {
@@ -51,6 +74,7 @@ public sealed class VideoPlaybackSession : IDisposable
         {
             ThrowIfDisposed();
             EnsureInitialized();
+            MpvPlaybackHelper.Check(MpvPlaybackHelper.CommandString(_mpv, "set pause yes"), "mpv 无法准备首帧。");
             MpvPlaybackHelper.Check(MpvPlaybackHelper.CommandString(_mpv, $"loadfile {StreamUri} replace"), "mpv 无法载入内存视频流。");
         }
     }
@@ -129,6 +153,8 @@ public sealed class VideoPlaybackSession : IDisposable
         MpvPlaybackHelper.ObserveProperty(_mpv, 1, "time-pos", MpvFormat.Double);
         MpvPlaybackHelper.ObserveProperty(_mpv, 2, "duration", MpvFormat.Double);
         MpvPlaybackHelper.ObserveProperty(_mpv, 3, "pause", MpvFormat.Flag);
+        MpvPlaybackHelper.ObserveProperty(_mpv, 4, "dwidth", MpvFormat.Int64);
+        MpvPlaybackHelper.ObserveProperty(_mpv, 5, "dheight", MpvFormat.Int64);
 
         _isInitialized = true;
         _eventLoopTask = Task.Run(EventLoop);
@@ -187,7 +213,15 @@ public sealed class VideoPlaybackSession : IDisposable
         switch (mpvEvent.EventId)
         {
             case MpvEventId.FileLoaded:
-                Playing?.Invoke();
+                break;
+            case MpvEventId.VideoReconfig:
+            case MpvEventId.PlaybackRestart:
+                if (!_hasShownVideoWindow)
+                {
+                    ShowVideoWindow();
+                    ExecuteCommand("set pause no");
+                }
+
                 break;
             case MpvEventId.PropertyChange:
                 HandlePropertyChange(mpvEvent.ReplyUserData, mpvEvent.Data);
@@ -214,7 +248,13 @@ public sealed class VideoPlaybackSession : IDisposable
         switch (replyUserData)
         {
             case 1 when property.Format == MpvFormat.Double:
-                TimeChanged?.Invoke(ToMilliseconds(Marshal.PtrToStructure<double>(property.Data)));
+                var positionSeconds = Marshal.PtrToStructure<double>(property.Data);
+                TimeChanged?.Invoke(ToMilliseconds(positionSeconds));
+                if (positionSeconds > 0.01)
+                {
+                    ShowVideoWindow();
+                }
+
                 break;
             case 2 when property.Format == MpvFormat.Double:
                 DurationChanged?.Invoke(ToMilliseconds(Marshal.PtrToStructure<double>(property.Data)));
@@ -230,6 +270,34 @@ public sealed class VideoPlaybackSession : IDisposable
                 }
 
                 break;
+            case 4 when property.Format == MpvFormat.Int64:
+                _displayWidth = Math.Max(0, Marshal.ReadInt64(property.Data));
+                NotifyVideoSizeIfReady();
+                break;
+            case 5 when property.Format == MpvFormat.Int64:
+                _displayHeight = Math.Max(0, Marshal.ReadInt64(property.Data));
+                NotifyVideoSizeIfReady();
+                break;
+        }
+    }
+
+    private void ShowVideoWindow()
+    {
+        if (_hasShownVideoWindow)
+        {
+            return;
+        }
+
+        _hasShownVideoWindow = true;
+        Playing?.Invoke();
+        _view.ShowPlayerWindow();
+    }
+
+    private void NotifyVideoSizeIfReady()
+    {
+        if (_displayWidth > 0 && _displayHeight > 0)
+        {
+            VideoSizeChanged?.Invoke(_displayWidth, _displayHeight);
         }
     }
 
@@ -280,6 +348,16 @@ public sealed class VideoPlaybackSession : IDisposable
         {
             throw new ObjectDisposedException(nameof(VideoPlaybackSession));
         }
+    }
+
+    private sealed class CoverFrameStreamSource
+    {
+        public CoverFrameStreamSource(ArraySegment<byte> videoData)
+        {
+            VideoData = videoData;
+        }
+
+        public ArraySegment<byte> VideoData { get; }
     }
 
     private sealed class MpvStreamCookie : IDisposable
@@ -339,13 +417,22 @@ public sealed class VideoPlaybackSession : IDisposable
     {
         try
         {
-            var session = GCHandle.FromIntPtr(userData).Target as VideoPlaybackSession;
-            if (session is null)
+            ArraySegment<byte> videoData;
+            var streamSource = GCHandle.FromIntPtr(userData).Target;
+            if (streamSource is VideoPlaybackSession session)
+            {
+                videoData = session.VideoData;
+            }
+            else if (streamSource is CoverFrameStreamSource source)
+            {
+                videoData = source.VideoData;
+            }
+            else
             {
                 return -1;
             }
 
-            var cookie = new MpvStreamCookie(session._videoData);
+            var cookie = new MpvStreamCookie(videoData);
             var cookieHandle = GCHandle.Alloc(cookie);
             var streamInfo = Marshal.PtrToStructure<MpvStreamCbInfo>(info);
             streamInfo.Cookie = GCHandle.ToIntPtr(cookieHandle);
@@ -403,6 +490,107 @@ public sealed class VideoPlaybackSession : IDisposable
         }
     }
 
+    private static ArraySegment<byte>? TryRenderFirstFramePng(
+        ArraySegment<byte> videoData,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        if (videoData.Array is null)
+        {
+            return null;
+        }
+
+        var source = new CoverFrameStreamSource(videoData);
+        var sourceHandle = GCHandle.Alloc(source);
+        var tempDir = Path.Combine(Path.GetTempPath(), "ComicViewer", "mpv-cover-" + Guid.NewGuid().ToString("N"));
+        IntPtr mpv = IntPtr.Zero;
+        try
+        {
+            Directory.CreateDirectory(tempDir);
+            mpv = MpvPlaybackHelper.Create();
+            if (mpv == IntPtr.Zero)
+            {
+                return null;
+            }
+
+            SetCoverOption(mpv, "config", "no");
+            SetCoverOption(mpv, "terminal", "no");
+            SetCoverOption(mpv, "osc", "no");
+            SetCoverOption(mpv, "audio", "no");
+            SetCoverOption(mpv, "vo", "image");
+            SetCoverOption(mpv, "vo-image-format", "png");
+            SetCoverOption(mpv, "vo-image-outdir", tempDir);
+            SetCoverOption(mpv, "frames", "1");
+
+            if (MpvPlaybackHelper.Initialize(mpv) < 0
+                || MpvPlaybackHelper.StreamCbAddRo(mpv, "comic", GCHandle.ToIntPtr(sourceHandle), MpvPlaybackHelper.OpenStreamCallback) < 0
+                || MpvPlaybackHelper.CommandString(mpv, $"loadfile {StreamUri} replace") < 0)
+            {
+                return null;
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            while (stopwatch.Elapsed < timeout)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var eventPtr = MpvPlaybackHelper.WaitEvent(mpv, 0.1);
+                if (eventPtr == IntPtr.Zero)
+                {
+                    continue;
+                }
+
+                var mpvEvent = Marshal.PtrToStructure<MpvEvent>(eventPtr);
+                if (mpvEvent.EventId is MpvEventId.EndFile or MpvEventId.Shutdown)
+                {
+                    break;
+                }
+            }
+
+            var framePath = Directory
+                .EnumerateFiles(tempDir, "*.png", SearchOption.TopDirectoryOnly)
+                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .FirstOrDefault();
+            if (framePath is null)
+            {
+                return default(ArraySegment<byte>?);
+            }
+
+            return new ArraySegment<byte>(File.ReadAllBytes(framePath));
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            if (mpv != IntPtr.Zero)
+            {
+                MpvPlaybackHelper.TerminateDestroy(mpv);
+            }
+
+            if (sourceHandle.IsAllocated)
+            {
+                sourceHandle.Free();
+            }
+
+            try
+            {
+                if (Directory.Exists(tempDir))
+                {
+                    Directory.Delete(tempDir, recursive: true);
+                }
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    private static void SetCoverOption(IntPtr mpv, string name, string value)
+    {
+        _ = MpvPlaybackHelper.SetOptionString(mpv, name, value);
+    }
+
     private static class MpvPlaybackHelper
     {
         public static readonly OpenStreamDelegate OpenStreamCallback = OpenStream;
@@ -455,14 +643,54 @@ public sealed class VideoPlaybackSession : IDisposable
 public sealed class MpvVideoHost : HwndHost
 {
     private const int WsChild = 0x40000000;
-    private const int WsVisible = 0x10000000;
     private const int WsClipSiblings = 0x04000000;
     private const int WsClipChildren = 0x02000000;
+    private const int SwpNoZOrder = 0x0004;
+    private const int SwpNoActivate = 0x0010;
+    private const int SwShowNoActivate = 4;
 
     private readonly TaskCompletionSource _handleReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly FrameworkElement? _clippingElement;
+    private readonly IntPtr _initialParentHandle;
+    private readonly int _initialWidth;
+    private readonly int _initialHeight;
     private IntPtr _hwnd;
+    private Rect _lastBounds;
+    private bool _isHosted;
+    private bool _shouldShow;
+    private bool _isDisposed;
+
+    public MpvVideoHost(
+        FrameworkElement? clippingElement = null,
+        IntPtr initialParentHandle = default,
+        int initialWidth = 1,
+        int initialHeight = 1)
+    {
+        _clippingElement = clippingElement;
+        _initialParentHandle = initialParentHandle;
+        _initialWidth = Math.Max(1, initialWidth);
+        _initialHeight = Math.Max(1, initialHeight);
+        if (_clippingElement is not null)
+        {
+            _clippingElement.LayoutUpdated += ClippingElement_LayoutUpdated;
+        }
+
+        EnsurePlayerWindowCreated();
+    }
 
     public IntPtr PlayerWindowHandle => _hwnd;
+
+    public void ShowPlayerWindow()
+    {
+        if (Dispatcher.CheckAccess())
+        {
+            ShowPlayerWindowCore();
+        }
+        else
+        {
+            Dispatcher.BeginInvoke((Action)ShowPlayerWindowCore);
+        }
+    }
 
     public Task WaitForHandleAsync(TimeSpan timeout, CancellationToken cancellationToken)
     {
@@ -471,39 +699,176 @@ public sealed class MpvVideoHost : HwndHost
 
     protected override HandleRef BuildWindowCore(HandleRef hwndParent)
     {
-        _hwnd = CreateWindowEx(
-            0,
-            "static",
-            "",
-            WsChild | WsVisible | WsClipSiblings | WsClipChildren,
-            0,
-            0,
-            Math.Max(1, (int)ActualWidth),
-            Math.Max(1, (int)ActualHeight),
-            hwndParent.Handle,
-            IntPtr.Zero,
-            IntPtr.Zero,
-            IntPtr.Zero);
-        _handleReady.TrySetResult();
+        EnsurePlayerWindowCreated(hwndParent.Handle);
+        if (_hwnd != IntPtr.Zero)
+        {
+            SetParent(_hwnd, hwndParent.Handle);
+            _isHosted = true;
+            UpdateWindowPlacement();
+            if (_shouldShow)
+            {
+                ShowPlayerWindowCore();
+            }
+        }
+
         return new HandleRef(this, _hwnd);
+    }
+
+    private void ShowPlayerWindowCore()
+    {
+        _shouldShow = true;
+        if (_hwnd != IntPtr.Zero && _isHosted)
+        {
+            UpdateWindowPlacement();
+            ShowWindow(_hwnd, SwShowNoActivate);
+        }
+    }
+
+    protected override void OnWindowPositionChanged(Rect rcBoundingBox)
+    {
+        base.OnWindowPositionChanged(rcBoundingBox);
+        _lastBounds = rcBoundingBox;
+        UpdateWindowPlacement();
     }
 
     protected override void DestroyWindowCore(HandleRef hwnd)
     {
-        if (hwnd.Handle != IntPtr.Zero)
-        {
-            DestroyWindow(hwnd.Handle);
-        }
-
-        _hwnd = IntPtr.Zero;
+        _isHosted = false;
     }
 
-    protected override void OnRenderSizeChanged(SizeChangedInfo sizeInfo)
+    public new void Dispose()
     {
-        base.OnRenderSizeChanged(sizeInfo);
+        if (_isDisposed)
+        {
+            return;
+        }
+
+        _isDisposed = true;
+        if (_clippingElement is not null)
+        {
+            _clippingElement.LayoutUpdated -= ClippingElement_LayoutUpdated;
+        }
+
+        DestroyPlayerWindow();
+        base.Dispose();
+    }
+
+    private void ClippingElement_LayoutUpdated(object? sender, EventArgs e)
+    {
+        UpdateWindowPlacement();
+    }
+
+    private void UpdateWindowPlacement()
+    {
+        if (_hwnd == IntPtr.Zero || _lastBounds.IsEmpty)
+        {
+            return;
+        }
+
+        SetWindowPos(
+            _hwnd,
+            IntPtr.Zero,
+            (int)Math.Round(_lastBounds.X),
+            (int)Math.Round(_lastBounds.Y),
+            Math.Max(1, (int)Math.Round(_lastBounds.Width)),
+            Math.Max(1, (int)Math.Round(_lastBounds.Height)),
+            SwpNoZOrder | SwpNoActivate);
+        UpdateClipRegion();
+    }
+
+    private void EnsurePlayerWindowCreated(IntPtr parentHandle = default)
+    {
         if (_hwnd != IntPtr.Zero)
         {
-            MoveWindow(_hwnd, 0, 0, Math.Max(1, (int)ActualWidth), Math.Max(1, (int)ActualHeight), true);
+            return;
+        }
+
+        var parent = parentHandle != IntPtr.Zero ? parentHandle : _initialParentHandle;
+        _hwnd = CreateWindowEx(
+            0,
+            "static",
+            "",
+            WsChild | WsClipSiblings | WsClipChildren,
+            -32000,
+            -32000,
+            _initialWidth,
+            _initialHeight,
+            parent,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            IntPtr.Zero);
+        if (_hwnd != IntPtr.Zero)
+        {
+            _handleReady.TrySetResult();
+        }
+    }
+
+    private void DestroyPlayerWindow()
+    {
+        if (_hwnd != IntPtr.Zero)
+        {
+            DestroyWindow(_hwnd);
+            _hwnd = IntPtr.Zero;
+        }
+    }
+
+    private void UpdateClipRegion()
+    {
+        var clipBounds = GetClipBounds();
+        if (clipBounds is null)
+        {
+            SetWindowRgn(_hwnd, IntPtr.Zero, true);
+            return;
+        }
+
+        var visibleBounds = Rect.Intersect(_lastBounds, clipBounds.Value);
+        IntPtr region;
+        if (visibleBounds.IsEmpty)
+        {
+            region = CreateRectRgn(0, 0, 0, 0);
+        }
+        else
+        {
+            region = CreateRectRgn(
+                Math.Max(0, (int)Math.Floor(visibleBounds.X - _lastBounds.X)),
+                Math.Max(0, (int)Math.Floor(visibleBounds.Y - _lastBounds.Y)),
+                Math.Max(0, (int)Math.Ceiling(visibleBounds.Right - _lastBounds.X)),
+                Math.Max(0, (int)Math.Ceiling(visibleBounds.Bottom - _lastBounds.Y)));
+        }
+
+        if (SetWindowRgn(_hwnd, region, true) == 0)
+        {
+            DeleteObject(region);
+        }
+    }
+
+    private Rect? GetClipBounds()
+    {
+        if (_clippingElement is null
+            || !IsVisible
+            || !_clippingElement.IsVisible
+            || ActualWidth <= 0
+            || ActualHeight <= 0
+            || _clippingElement.ActualWidth <= 0
+            || _clippingElement.ActualHeight <= 0)
+        {
+            return null;
+        }
+
+        var source = PresentationSource.FromVisual(this);
+        if (source?.RootVisual is not Visual root)
+        {
+            return null;
+        }
+
+        try
+        {
+            return _clippingElement.TransformToAncestor(root)
+                .TransformBounds(new Rect(0, 0, _clippingElement.ActualWidth, _clippingElement.ActualHeight));
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
         }
     }
 
@@ -526,7 +891,29 @@ public sealed class MpvVideoHost : HwndHost
     private static extern bool DestroyWindow(IntPtr hwnd);
 
     [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool MoveWindow(IntPtr hwnd, int x, int y, int nWidth, int nHeight, bool repaint);
+    private static extern IntPtr SetParent(IntPtr hwndChild, IntPtr hwndNewParent);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(
+        IntPtr hwnd,
+        IntPtr hwndInsertAfter,
+        int x,
+        int y,
+        int cx,
+        int cy,
+        int flags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool ShowWindow(IntPtr hwnd, int command);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int SetWindowRgn(IntPtr hwnd, IntPtr region, bool redraw);
+
+    [DllImport("gdi32.dll", SetLastError = true)]
+    private static extern IntPtr CreateRectRgn(int left, int top, int right, int bottom);
+
+    [DllImport("gdi32.dll", SetLastError = true)]
+    private static extern bool DeleteObject(IntPtr handle);
 }
 
 public enum MpvFormat

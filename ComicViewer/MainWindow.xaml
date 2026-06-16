@@ -97,7 +97,7 @@
         <Style x:Key="VideoPlaybackHostVisibilityStyle" TargetType="{x:Type ContentControl}">
             <Setter Property="Visibility" Value="Collapsed" />
             <Style.Triggers>
-                <DataTrigger Binding="{Binding IsVideoPlaying}" Value="True">
+                <DataTrigger Binding="{Binding IsPlaybackHostVisible}" Value="True">
                     <Setter Property="Visibility" Value="Visible" />
                 </DataTrigger>
             </Style.Triggers>
@@ -302,6 +302,9 @@
                 </Setter.Value>
             </Setter>
             <Style.Triggers>
+                <DataTrigger Binding="{Binding IsVideoPreparing}" Value="True">
+                    <Setter Property="Visibility" Value="Collapsed" />
+                </DataTrigger>
                 <MultiDataTrigger>
                     <MultiDataTrigger.Conditions>
                         <Condition Binding="{Binding IsVideoPlaying}" Value="True" />
@@ -539,7 +542,11 @@
                                    IsHitTestVisible="False"
                                    Style="{StaticResource VideoFrameVisibilityStyle}" />
 
-                            <ContentControl Content="{Binding PlaybackElement}"
+                            <ContentControl Width="{Binding PlaybackHostWidth}"
+                                            Height="{Binding PlaybackHostHeight}"
+                                            HorizontalAlignment="Left"
+                                            VerticalAlignment="Top"
+                                            Content="{Binding PlaybackElement}"
                                             Style="{StaticResource VideoPlaybackHostVisibilityStyle}" />
 
                             <Button HorizontalAlignment="Center"

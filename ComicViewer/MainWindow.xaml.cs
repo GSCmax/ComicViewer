@@ -11,6 +11,7 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Interop;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -531,8 +532,9 @@ public partial class MainWindow : Window
 
             using var encodedMedia = session.CopyEntryToMemory(request.EntryKey, cancellationToken);
             var videoData = TakeMemorySegment(encodedMedia);
+            var coverFrame = await TryRenderVideoCoverFrameAsync(videoData, cancellationToken);
             await Dispatcher.InvokeAsync(
-                () => AcceptVideo(request, videoData, generation),
+                () => AcceptVideo(request, videoData, coverFrame, generation),
                 System.Windows.Threading.DispatcherPriority.Background);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -622,7 +624,7 @@ public partial class MainWindow : Window
         UpdateReadingStatus(GetCurrentPageIndex());
     }
 
-    private void AcceptVideo(MediaLoadRequest request, ArraySegment<byte> videoData, int generation)
+    private void AcceptVideo(MediaLoadRequest request, ArraySegment<byte> videoData, ImageSource? coverFrame, int generation)
     {
         if (!IsFreshRequest(request, generation))
         {
@@ -631,7 +633,16 @@ public partial class MainWindow : Window
         }
 
         var page = Pages[request.PageIndex];
-        StoreCachedMedia(new CachedMedia(request.EntryKey, request.PageIndex, request.Type, null, videoData, null, videoData.Count), request);
+        StoreCachedMedia(new CachedMedia(request.EntryKey, request.PageIndex, request.Type, null, videoData, coverFrame, videoData.Count), request);
+        if (coverFrame is not null && !page.IsVideoPlaying)
+        {
+            page.SetVideoFrame(coverFrame);
+            if (coverFrame.Width > 0)
+            {
+                page.SetAspectRatio(coverFrame.Height / coverFrame.Width, _pageWidth);
+            }
+        }
+
         page.SetCoverLoadStatus(VideoCoverLoadStatus.Success);
         EvictMediaOverBudget();
         UpdateReadingStatus(GetCurrentPageIndex());
@@ -958,6 +969,11 @@ public partial class MainWindow : Window
         try
         {
             button.IsEnabled = false;
+            if (page.IsVideoPreparing)
+            {
+                return;
+            }
+
             if (page.PlaybackSession is not null && page.IsVideoPaused)
             {
                 page.ResumeVideo();
@@ -1029,7 +1045,7 @@ public partial class MainWindow : Window
             page.SetVideoPlaybackSession(session);
             assignedToPage = true;
             AttachPlaybackEvents(page, session);
-            page.IsVideoPlaying = true;
+            page.IsVideoPreparing = true;
             page.IsVideoPaused = false;
 
             await Dispatcher.InvokeAsync(() => PagesListBox.UpdateLayout());
@@ -1092,9 +1108,31 @@ public partial class MainWindow : Window
             : new MemoryStream(data.Array, data.Offset, data.Count, writable: false);
     }
 
-    private static VideoPlaybackSession CreateVideoSession(ComicPage page, ArraySegment<byte> videoData)
+    private static async Task<ImageSource?> TryRenderVideoCoverFrameAsync(
+        ArraySegment<byte> videoData,
+        CancellationToken cancellationToken)
     {
-        return new VideoPlaybackSession(videoData);
+        var framePng = await VideoPlaybackSession.TryRenderFirstFramePngAsync(
+            videoData,
+            TimeSpan.FromSeconds(2),
+            cancellationToken);
+        if (framePng is not { } pngData)
+        {
+            return null;
+        }
+
+        using var stream = CreateReadOnlyMemoryStream(pngData);
+        return DecodeImage(stream, MinimumDecodePixelWidth);
+    }
+
+    private VideoPlaybackSession CreateVideoSession(ComicPage page, ArraySegment<byte> videoData)
+    {
+        return new VideoPlaybackSession(
+            videoData,
+            PagesListBox,
+            new WindowInteropHelper(this).Handle,
+            Math.Max(1, (int)Math.Round(page.DisplayWidth)),
+            Math.Max(1, (int)Math.Round(page.DisplayHeight)));
     }
 
     private void AttachPlaybackEvents(ComicPage page, VideoPlaybackSession session)
@@ -1103,6 +1141,8 @@ public partial class MainWindow : Window
         {
             if (page.PlaybackSession == session)
             {
+                page.IsVideoPreparing = false;
+                page.IsVideoPlaying = true;
                 page.IsVideoPaused = false;
                 StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - 正在播放";
             }
@@ -1122,6 +1162,14 @@ public partial class MainWindow : Window
             if (page.PlaybackSession == session)
             {
                 page.SetVideoDuration(durationMs);
+            }
+        }));
+
+        session.VideoSizeChanged += (width, height) => Dispatcher.BeginInvoke((Action)(() =>
+        {
+            if (page.PlaybackSession == session && width > 0)
+            {
+                page.SetAspectRatio((double)height / width, _pageWidth);
             }
         }));
 
@@ -1817,6 +1865,7 @@ public sealed class ComicPage : INotifyPropertyChanged
     private VideoPlaybackSession? _videoPlaybackSession;
     private ImageSource? _videoFrame;
     private bool _isVideoPaused;
+    private bool _isVideoPreparing;
     private bool _isVideoPlaying;
     private long _videoPositionMs;
     private long _videoDurationMs;
@@ -1863,6 +1912,12 @@ public sealed class ComicPage : INotifyPropertyChanged
 
     public FrameworkElement? PlaybackElement => _videoPlaybackSession?.View;
 
+    public bool IsPlaybackHostVisible => IsVideoPlaying;
+
+    public double PlaybackHostWidth => DisplayWidth;
+
+    public double PlaybackHostHeight => DisplayHeight;
+
     public BitmapImage? Image
     {
         get => _image;
@@ -1902,6 +1957,26 @@ public sealed class ComicPage : INotifyPropertyChanged
                 _isVideoPlaying = value;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(VideoOverlayText));
+                OnPropertyChanged(nameof(IsPlaybackHostVisible));
+                OnPropertyChanged(nameof(PlaybackHostWidth));
+                OnPropertyChanged(nameof(PlaybackHostHeight));
+            }
+        }
+    }
+
+    public bool IsVideoPreparing
+    {
+        get => _isVideoPreparing;
+        set
+        {
+            if (_isVideoPreparing != value)
+            {
+                _isVideoPreparing = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(IsPlaybackHostVisible));
+                OnPropertyChanged(nameof(PlaybackHostWidth));
+                OnPropertyChanged(nameof(PlaybackHostHeight));
+                OnPropertyChanged(nameof(VideoOverlayText));
             }
         }
     }
@@ -1926,14 +2001,16 @@ public sealed class ComicPage : INotifyPropertyChanged
     public string VideoOverlayText => !IsVideo
         ? ""
         : !IsVideoPlaying
-            ? _coverLoadStatus switch
-            {
-                VideoCoverLoadStatus.Oversized => "视频过大，点击后加载播放",
-                VideoCoverLoadStatus.Loading => "正在加载封面...",
-                VideoCoverLoadStatus.Failed => "封面加载失败，点击播放",
-                VideoCoverLoadStatus.Success => "点击播放",
-                _ => "等待加载封面..."
-            }
+            ? IsVideoPreparing
+                ? "正在准备播放..."
+                : _coverLoadStatus switch
+                {
+                    VideoCoverLoadStatus.Oversized => "视频过大，点击后加载播放",
+                    VideoCoverLoadStatus.Loading => "正在加载封面...",
+                    VideoCoverLoadStatus.Failed => "封面加载失败，点击播放",
+                    VideoCoverLoadStatus.Success => "点击播放",
+                    _ => "等待加载封面..."
+                }
             : VideoTimeText;
 
     public double DisplayWidth
@@ -2092,6 +2169,7 @@ public sealed class ComicPage : INotifyPropertyChanged
         IsVideoPlaying = false;
         IsVideoPaused = false;
         SetVideoPosition(0);
+        IsVideoPreparing = false;
         DisposeSessionInBackground(_videoPlaybackSession, stopFirst: true);
         _videoPlaybackSession = null;
         OnPropertyChanged(nameof(PlaybackElement));
@@ -2101,6 +2179,8 @@ public sealed class ComicPage : INotifyPropertyChanged
     {
         DisplayWidth = Math.Max(1, pageWidth);
         DisplayHeight = DisplayWidth * _aspectRatio;
+        OnPropertyChanged(nameof(PlaybackHostWidth));
+        OnPropertyChanged(nameof(PlaybackHostHeight));
     }
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
