@@ -306,14 +306,16 @@
             </Setter>
             <Style.Triggers>
                 <DataTrigger Binding="{Binding IsVideoPreparing}" Value="True">
-                    <Setter Property="Visibility" Value="Collapsed" />
+                    <Setter Property="Opacity" Value="0" />
+                    <Setter Property="IsHitTestVisible" Value="False" />
                 </DataTrigger>
                 <MultiDataTrigger>
                     <MultiDataTrigger.Conditions>
                         <Condition Binding="{Binding IsVideoPlaying}" Value="True" />
                         <Condition Binding="{Binding IsVideoPaused}" Value="False" />
                     </MultiDataTrigger.Conditions>
-                    <Setter Property="Visibility" Value="Collapsed" />
+                    <Setter Property="Opacity" Value="0" />
+                    <Setter Property="IsHitTestVisible" Value="False" />
                 </MultiDataTrigger>
             </Style.Triggers>
         </Style>
@@ -544,6 +546,7 @@
                                             Height="{Binding PlaybackHostHeight}"
                                             HorizontalAlignment="Left"
                                             VerticalAlignment="Top"
+                                            IsHitTestVisible="False"
                                             Panel.ZIndex="0"
                                             Content="{Binding PlaybackElement}"
                                             Style="{StaticResource VideoPlaybackHostVisibilityStyle}" />

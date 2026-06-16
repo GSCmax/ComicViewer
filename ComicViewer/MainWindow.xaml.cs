@@ -984,6 +984,7 @@ public partial class MainWindow : Window
         }
         finally
         {
+            ReleaseMouseInputCapture();
             button.IsEnabled = true;
             e.Handled = true;
         }
@@ -994,8 +995,19 @@ public partial class MainWindow : Window
         if (sender is FrameworkElement { DataContext: ComicPage page } && page.IsVideoPlaying)
         {
             page.PauseVideo();
+            ReleaseMouseInputCapture();
             e.Handled = true;
         }
+    }
+
+    private static void ReleaseMouseInputCapture()
+    {
+        if (Mouse.Captured is UIElement capturedElement)
+        {
+            capturedElement.ReleaseMouseCapture();
+        }
+
+        Mouse.Capture(null);
     }
 
     private async Task PlayVideoAsync(ComicPage page)
@@ -1046,6 +1058,7 @@ public partial class MainWindow : Window
             AttachPlaybackEvents(page, session);
             page.IsVideoPreparing = true;
             page.IsVideoPaused = false;
+            ReleaseMouseInputCapture();
 
             await Dispatcher.InvokeAsync(() => PagesListBox.UpdateLayout());
             await session.WaitForHostReadyAsync(TimeSpan.FromSeconds(2), cancellationToken);

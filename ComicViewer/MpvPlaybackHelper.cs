@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Media;
 
 namespace ComicViewer;
 
@@ -139,6 +140,8 @@ public sealed class VideoPlaybackSession : IDisposable
         MpvNative.Check(MpvNative.SetOptionString(_mpv, "input-default-bindings", "no"), "mpv 选项设置失败。");
         MpvNative.Check(MpvNative.SetOptionString(_mpv, "input-vo-keyboard", "no"), "mpv 选项设置失败。");
         MpvNative.Check(MpvNative.SetOptionString(_mpv, "vo", "libmpv"), "mpv 选项设置失败。");
+        _ = MpvNative.SetOptionString(_mpv, "hwdec", "auto-safe");
+        _ = MpvNative.SetOptionString(_mpv, "video-timing-offset", "0");
         MpvNative.Check(MpvNative.Initialize(_mpv), "mpv 初始化失败。");
         MpvNative.Check(MpvNative.StreamCbAddRo(_mpv, "comic", GCHandle.ToIntPtr(_streamUserDataHandle), MpvNative.OpenStreamCallback), "mpv 内存流注册失败。");
         MpvNative.Check(_view.InitializeRenderer(_mpv), "mpv OpenGL 渲染器初始化失败。");
@@ -269,7 +272,7 @@ public sealed class VideoPlaybackSession : IDisposable
 
         _hasShownVideoSurface = true;
         Playing?.Invoke();
-        ExecuteCommand("set pause no");
+        Task.Run(() => ExecuteCommand("set pause no"));
     }
 
     private void NotifyVideoSizeIfReady()
@@ -642,6 +645,7 @@ public sealed class MpvOpenGlVideoView : GLWpfControl
     private bool _isRendering;
     private bool _hasRenderedFrame;
     private bool _forceRender = true;
+    private int _renderRequestPending;
     private int _lastFramebuffer;
     private int _lastWidth;
     private int _lastHeight;
@@ -660,11 +664,13 @@ public sealed class MpvOpenGlVideoView : GLWpfControl
             new MpvRenderParam(MpvRenderParamType.Invalid, IntPtr.Zero)
         ];
 
-        Loaded += (_, _) => StartControl();
+        Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
         Ready += OnReady;
         Render += OnRender;
         HorizontalAlignment = HorizontalAlignment.Stretch;
         VerticalAlignment = VerticalAlignment.Stretch;
+        Cursor = System.Windows.Input.Cursors.Arrow;
         Focusable = false;
     }
 
@@ -689,14 +695,7 @@ public sealed class MpvOpenGlVideoView : GLWpfControl
     public void RequestRender()
     {
         _forceRender = true;
-        if (Dispatcher.CheckAccess())
-        {
-            InvalidateVisual();
-        }
-        else
-        {
-            Dispatcher.BeginInvoke((Action)InvalidateVisual);
-        }
+        Interlocked.Exchange(ref _renderRequestPending, 1);
     }
 
     public new void Dispose()
@@ -707,6 +706,9 @@ public sealed class MpvOpenGlVideoView : GLWpfControl
         }
 
         _isDisposed = true;
+        CompositionTarget.Rendering -= OnCompositionRendering;
+        Loaded -= OnLoaded;
+        Unloaded -= OnUnloaded;
         Render -= OnRender;
         Ready -= OnReady;
 
@@ -722,6 +724,28 @@ public sealed class MpvOpenGlVideoView : GLWpfControl
         Marshal.FreeHGlobal(_framebufferPtr);
         Marshal.FreeHGlobal(_flipYPtr);
         base.Dispose();
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        CompositionTarget.Rendering -= OnCompositionRendering;
+        CompositionTarget.Rendering += OnCompositionRendering;
+        StartControl();
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        CompositionTarget.Rendering -= OnCompositionRendering;
+    }
+
+    private void OnCompositionRendering(object? sender, EventArgs e)
+    {
+        if (_isDisposed || Interlocked.CompareExchange(ref _renderRequestPending, 1, 1) == 0)
+        {
+            return;
+        }
+
+        InvalidateVisual();
     }
 
     private void StartControl()
@@ -829,7 +853,6 @@ public sealed class MpvOpenGlVideoView : GLWpfControl
             if (_renderContext == IntPtr.Zero)
             {
                 GL.Clear(ClearBufferMask.ColorBufferBit);
-                GL.Flush();
                 return;
             }
 
@@ -855,7 +878,6 @@ public sealed class MpvOpenGlVideoView : GLWpfControl
 
             MpvRenderNative.RenderContextRender(_renderContext, _renderParams);
             MpvRenderNative.RenderContextReportSwap(_renderContext);
-            GL.Flush();
             _forceRender = false;
 
             if (!_hasRenderedFrame)
@@ -867,6 +889,7 @@ public sealed class MpvOpenGlVideoView : GLWpfControl
         finally
         {
             _isRendering = false;
+            Interlocked.Exchange(ref _renderRequestPending, 0);
         }
     }
 
