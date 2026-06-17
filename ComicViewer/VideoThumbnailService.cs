@@ -5,7 +5,7 @@ using System.Windows.Media.Imaging;
 
 namespace ComicViewer;
 
-internal sealed class VideoThumbnailService
+internal sealed class VideoThumbnailService : IDisposable
 {
     private readonly IVideoThumbnailProvider _provider;
 
@@ -21,6 +21,14 @@ internal sealed class VideoThumbnailService
     {
         return _provider.GenerateAsync(videoData, isRequestCurrent, cancellationToken);
     }
+
+    public void Dispose()
+    {
+        if (_provider is IDisposable disposable)
+        {
+            disposable.Dispose();
+        }
+    }
 }
 
 internal interface IVideoThumbnailProvider
@@ -31,21 +39,61 @@ internal interface IVideoThumbnailProvider
         CancellationToken cancellationToken);
 }
 
-internal sealed class HeadlessMpvVideoThumbnailProvider : IVideoThumbnailProvider
+internal sealed class HeadlessMpvVideoThumbnailProvider : IVideoThumbnailProvider, IDisposable
 {
-    private const string StreamUri = "comicthumb://media";
     private const int TimeoutMilliseconds = 3000;
     private const int ThumbnailWidth = 480;
+
+    private readonly SemaphoreSlim _generationGate = new(1, 1);
+    private readonly object _sessionLock = new();
+    private HeadlessMpvSession? _session;
+    private bool _isDisposed;
 
     public Task<VideoThumbnailImage?> GenerateAsync(
         ArraySegment<byte> videoData,
         Func<bool> isRequestCurrent,
         CancellationToken cancellationToken)
     {
-        return Task.Run(() => GenerateCore(videoData, isRequestCurrent, cancellationToken), cancellationToken);
+        return Task.Run(async () =>
+        {
+            await _generationGate.WaitAsync(cancellationToken);
+            try
+            {
+                return GenerateCore(videoData, isRequestCurrent, cancellationToken);
+            }
+            finally
+            {
+                _generationGate.Release();
+            }
+        }, cancellationToken);
     }
 
-    private static VideoThumbnailImage? GenerateCore(
+    public void Dispose()
+    {
+        if (_isDisposed)
+        {
+            return;
+        }
+
+        _isDisposed = true;
+        _generationGate.Wait();
+        try
+        {
+            lock (_sessionLock)
+            {
+                _session?.Dispose();
+                _session = null;
+            }
+        }
+        finally
+        {
+            _generationGate.Release();
+        }
+
+        _generationGate.Dispose();
+    }
+
+    private VideoThumbnailImage? GenerateCore(
         ArraySegment<byte> videoData,
         Func<bool> isRequestCurrent,
         CancellationToken cancellationToken)
@@ -55,45 +103,72 @@ internal sealed class HeadlessMpvVideoThumbnailProvider : IVideoThumbnailProvide
             throw new ArgumentException("Video data must reference a byte array.", nameof(videoData));
         }
 
-        using var session = new HeadlessMpvSession(videoData);
-        session.Load();
-        var deadline = DateTime.UtcNow.AddMilliseconds(TimeoutMilliseconds);
-        while (DateTime.UtcNow < deadline)
+        ThrowIfDisposed();
+        var session = EnsureSession();
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (!isRequestCurrent())
+            session.Load(videoData);
+            var deadline = DateTime.UtcNow.AddMilliseconds(TimeoutMilliseconds);
+            while (DateTime.UtcNow < deadline)
             {
-                return null;
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!isRequestCurrent())
+                {
+                    return null;
+                }
+
+                session.PumpEvents();
+                if (session.CanCaptureFrame && session.TryCaptureThumbnail(out var image))
+                {
+                    return image;
+                }
+
+                if (session.HasEnded)
+                {
+                    return null;
+                }
+
+                Thread.Sleep(15);
             }
 
-            session.PumpEvents();
-            if (session.CanCaptureFrame && session.TryCaptureThumbnail(out var image))
-            {
-                return image;
-            }
-
-            if (session.HasEnded)
-            {
-                return null;
-            }
-
-            Thread.Sleep(15);
+            return null;
         }
+        finally
+        {
+            session.Stop();
+        }
+    }
 
-        return null;
+    private HeadlessMpvSession EnsureSession()
+    {
+        lock (_sessionLock)
+        {
+            ThrowIfDisposed();
+            return _session ??= new HeadlessMpvSession();
+        }
+    }
+
+    private void ThrowIfDisposed()
+    {
+        if (_isDisposed)
+        {
+            throw new ObjectDisposedException(nameof(HeadlessMpvVideoThumbnailProvider));
+        }
     }
 
     private sealed class HeadlessMpvSession : IDisposable
     {
+        private const string StreamUri = "comicthumb://media";
+
         private readonly GCHandle _streamUserDataHandle;
         private readonly object _sourceLock = new();
-        private readonly ArraySegment<byte> _videoData;
+        private ArraySegment<byte> _videoData;
         private IntPtr _mpv;
         private bool _isDisposed;
 
-        public HeadlessMpvSession(ArraySegment<byte> videoData)
+        public HeadlessMpvSession()
         {
-            _videoData = videoData;
+            _videoData = default;
             _streamUserDataHandle = GCHandle.Alloc(this);
             _mpv = HeadlessMpvNative.Create();
             HeadlessMpvNative.Check(_mpv != IntPtr.Zero ? 0 : -1, "创建 mpv 缩略图实例失败。");
@@ -115,9 +190,31 @@ internal sealed class HeadlessMpvVideoThumbnailProvider : IVideoThumbnailProvide
             }
         }
 
-        public void Load()
+        public void Load(ArraySegment<byte> videoData)
         {
+            ThrowIfDisposed();
+            Stop();
+            lock (_sourceLock)
+            {
+                _videoData = videoData;
+            }
+
+            HasEnded = false;
+            CanCaptureFrame = false;
             HeadlessMpvNative.Check(HeadlessMpvNative.CommandString(_mpv, $"loadfile {StreamUri} replace"), "mpv 无法载入缩略图视频流。");
+        }
+
+        public void Stop()
+        {
+            if (_isDisposed || _mpv == IntPtr.Zero)
+            {
+                return;
+            }
+
+            _ = HeadlessMpvNative.CommandString(_mpv, "stop");
+            HasEnded = false;
+            CanCaptureFrame = false;
+            PumpEvents();
         }
 
         public void PumpEvents()
@@ -150,6 +247,7 @@ internal sealed class HeadlessMpvVideoThumbnailProvider : IVideoThumbnailProvide
 
         public bool TryCaptureThumbnail(out VideoThumbnailImage? image)
         {
+            ThrowIfDisposed();
             return HeadlessMpvNative.TryCaptureRawScreenshot(_mpv, out image);
         }
 
@@ -170,6 +268,14 @@ internal sealed class HeadlessMpvVideoThumbnailProvider : IVideoThumbnailProvide
             if (_streamUserDataHandle.IsAllocated)
             {
                 _streamUserDataHandle.Free();
+            }
+        }
+
+        private void ThrowIfDisposed()
+        {
+            if (_isDisposed || _mpv == IntPtr.Zero)
+            {
+                throw new ObjectDisposedException(nameof(HeadlessMpvSession));
             }
         }
 

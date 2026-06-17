@@ -506,6 +506,7 @@ public partial class MainWindow
     {
         StopSharedVideoPlayer();
         _sharedVideoPlayer?.Dispose();
+        _videoThumbnailService?.Dispose();
         VideoCoverGeneratorHost.Content = null;
         _sharedVideoPlayer = null;
         _videoThumbnailService = null;
