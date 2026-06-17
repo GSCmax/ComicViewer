@@ -322,7 +322,7 @@ public partial class MainWindow
             CurrentPageTextBox.Text = (currentPageIndex + 1).ToString(CultureInfo.InvariantCulture);
         }
 
-        TotalPagesTextBlock.Text = $"/ {Pages.Count.ToString(CultureInfo.InvariantCulture)}";
+        TotalPagesTextBlock.Text = Pages.Count.ToString(CultureInfo.InvariantCulture);
         LoadedRangeTextBlock.Text = GetLoadedRangeText();
     }
 
@@ -346,7 +346,7 @@ public partial class MainWindow
     {
         CurrentPageTextBox.IsEnabled = false;
         CurrentPageTextBox.Text = "";
-        TotalPagesTextBlock.Text = "/ 0";
+        TotalPagesTextBlock.Text = "0";
         LoadedRangeTextBlock.Text = "0";
     }
 
