@@ -397,7 +397,7 @@ public partial class MainWindow
         return Pages
             .Where(page => page.IsVideo
                 && !page.HasDisplayImage
-                && !page.HasEncodedImageData
+                && !page.HasEncodedDisplayImageData
                 && page.CoverLoadStatus != VideoCoverLoadStatus.Failed
                 && page.CoverLoadStatus != VideoCoverLoadStatus.Oversized
                 && TryGetCachedVideoData(page.EntryKey).HasValue)
@@ -446,7 +446,7 @@ public partial class MainWindow
 
     private void StoreVideoCoverFrame(ComicPage page, VideoThumbnailImage coverImage)
     {
-        page.SetEncodedImageData(coverImage.ImageData);
+        page.SetEncodedDisplayImageData(coverImage.ImageData);
         if (coverImage.VideoWidth > 0)
         {
             page.SetAspectRatio((double)coverImage.VideoHeight / coverImage.VideoWidth, _pageWidth);

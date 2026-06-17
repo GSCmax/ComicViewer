@@ -11,7 +11,7 @@ public sealed class ComicPage : INotifyPropertyChanged
     private const double DefaultAspectRatio = 1.45;
     private const double DefaultVideoAspectRatio = 9d / 16d;
 
-    private ArraySegment<byte>? _encodedImageData;
+    private ArraySegment<byte>? _encodedDisplayImageData;
     private ImageSource? _displayImage;
     private MpvVideoPlayerControl? _videoPlayer;
     private long _videoPositionMs;
@@ -47,9 +47,9 @@ public sealed class ComicPage : INotifyPropertyChanged
 
     public bool IsLoaded => DisplayImage is not null || _videoPlayer?.HasRenderedFirstFrame == true;
 
-    public ArraySegment<byte>? EncodedImageData => _encodedImageData;
+    public ArraySegment<byte>? EncodedDisplayImageData => _encodedDisplayImageData;
 
-    public bool HasEncodedImageData => _encodedImageData is not null;
+    public bool HasEncodedDisplayImageData => _encodedDisplayImageData is not null;
 
     public string DisplayNumber => (Index + 1).ToString(CultureInfo.InvariantCulture);
 
@@ -150,19 +150,19 @@ public sealed class ComicPage : INotifyPropertyChanged
         Resize(pageWidth);
     }
 
-    public void SetEncodedImageData(ArraySegment<byte> encodedImageData)
+    public void SetEncodedDisplayImageData(ArraySegment<byte> encodedDisplayImageData)
     {
-        if (!EncodedImageDataEquals(encodedImageData))
+        if (!EncodedDisplayImageDataEquals(encodedDisplayImageData))
         {
-            _encodedImageData = encodedImageData;
+            _encodedDisplayImageData = encodedDisplayImageData;
         }
     }
 
-    public bool EncodedImageDataEquals(ArraySegment<byte>? encodedImageData)
+    public bool EncodedDisplayImageDataEquals(ArraySegment<byte>? encodedDisplayImageData)
     {
-        if (_encodedImageData is not { } current || encodedImageData is not { } other)
+        if (_encodedDisplayImageData is not { } current || encodedDisplayImageData is not { } other)
         {
-            return _encodedImageData is null && encodedImageData is null;
+            return _encodedDisplayImageData is null && encodedDisplayImageData is null;
         }
 
         return ReferenceEquals(current.Array, other.Array)
@@ -170,9 +170,9 @@ public sealed class ComicPage : INotifyPropertyChanged
             && current.Count == other.Count;
     }
 
-    public void ClearEncodedImageData()
+    public void ClearEncodedDisplayImageData()
     {
-        _encodedImageData = null;
+        _encodedDisplayImageData = null;
         DisplayImage = null;
     }
 

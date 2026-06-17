@@ -329,7 +329,7 @@ public partial class MainWindow
     private string GetLoadedRangeText()
     {
         var loaded = Pages
-            .Where(page => page.HasEncodedImageData || (page.IsVideo && page.IsLoaded))
+            .Where(page => page.HasEncodedDisplayImageData || (page.IsVideo && page.IsLoaded))
             .Select(page => page.Index + 1)
             .ToList();
         if (loaded.Count == 0)

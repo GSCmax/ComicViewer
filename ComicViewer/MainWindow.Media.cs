@@ -236,7 +236,7 @@ public partial class MainWindow
 
     private void ApplyLoadedImageData(ComicPage page, ArraySegment<byte> imageData)
     {
-        page.SetEncodedImageData(imageData);
+        page.SetEncodedDisplayImageData(imageData);
         if (TryReadImageAspectRatio(imageData) is { } aspectRatio)
         {
             page.SetAspectRatio(aspectRatio, _pageWidth);
@@ -372,13 +372,13 @@ public partial class MainWindow
         }
 
         var page = Pages[media.PageIndex];
-        if (media.Type == ComicMediaType.Image && page.EncodedImageDataEquals(media.ImageData))
+        if (media.Type == ComicMediaType.Image && page.EncodedDisplayImageDataEquals(media.ImageData))
         {
-            page.ClearEncodedImageData();
+            page.ClearEncodedDisplayImageData();
         }
-        else if (media.Type == ComicMediaType.Video && page.EncodedImageDataEquals(media.CoverImageData))
+        else if (media.Type == ComicMediaType.Video && page.EncodedDisplayImageDataEquals(media.CoverImageData))
         {
-            page.ClearEncodedImageData();
+            page.ClearEncodedDisplayImageData();
             page.SetCoverLoadStatus(VideoCoverLoadStatus.Loading);
         }
     }
@@ -387,11 +387,11 @@ public partial class MainWindow
     {
         if (cachedMedia.Type == ComicMediaType.Image && cachedMedia.ImageData is { } imageData)
         {
-            page.SetEncodedImageData(imageData);
+            page.SetEncodedDisplayImageData(imageData);
         }
         else if (cachedMedia.Type == ComicMediaType.Video && cachedMedia.CoverImageData is { } coverImageData)
         {
-            page.SetEncodedImageData(coverImageData);
+            page.SetEncodedDisplayImageData(coverImageData);
             page.SetCoverLoadStatus(VideoCoverLoadStatus.Success);
             ScheduleDecodeVisibleImages();
         }
@@ -409,7 +409,7 @@ public partial class MainWindow
             return;
         }
 
-        foreach (var page in Pages.Where(page => page.HasEncodedImageData && page.DisplayImage is not null))
+        foreach (var page in Pages.Where(page => page.HasEncodedDisplayImageData && page.DisplayImage is not null))
         {
             page.ClearDisplayImage(_pageWidth);
         }
@@ -436,7 +436,7 @@ public partial class MainWindow
 
         foreach (var page in Pages)
         {
-            page.ClearEncodedImageData();
+            page.ClearEncodedDisplayImageData();
             page.ClearDisplayImage(_pageWidth);
         }
     }
@@ -543,7 +543,7 @@ public partial class MainWindow
     private void ReleaseDecodedImagesOutsideRange()
     {
         var keepDecoded = GetDecodedImageIndexes();
-        foreach (var page in Pages.Where(page => page.HasEncodedImageData && page.DisplayImage is not null && !keepDecoded.Contains(page.Index)))
+        foreach (var page in Pages.Where(page => page.HasEncodedDisplayImageData && page.DisplayImage is not null && !keepDecoded.Contains(page.Index)))
         {
             page.ClearDisplayImage(_pageWidth);
         }
@@ -559,7 +559,7 @@ public partial class MainWindow
     private void DecodeVisibleImages()
     {
         var decodePixelWidth = GetDecodePixelWidth();
-        foreach (var page in GetDecodedImageIndexes().Select(index => Pages[index]).Where(page => page.DisplayImage is null && page.EncodedImageData is not null))
+        foreach (var page in GetDecodedImageIndexes().Select(index => Pages[index]).Where(page => page.DisplayImage is null && page.EncodedDisplayImageData is not null))
         {
             lock (_cacheLock)
             {
@@ -570,12 +570,12 @@ public partial class MainWindow
             }
 
             var generation = _cacheGeneration;
-            var encodedImageData = page.EncodedImageData!.Value;
+            var encodedDisplayImageData = page.EncodedDisplayImageData!.Value;
             _ = Task.Run(() =>
             {
                 try
                 {
-                    using var stream = CreateReadOnlyMemoryStream(encodedImageData);
+                    using var stream = CreateReadOnlyMemoryStream(encodedDisplayImageData);
                     var image = DecodeImage(stream, decodePixelWidth);
                     Dispatcher.BeginInvoke((Action)(() =>
                     {
@@ -586,7 +586,7 @@ public partial class MainWindow
 
                         if (generation == _cacheGeneration
                             && decodePixelWidth == GetDecodePixelWidth()
-                            && page.EncodedImageDataEquals(encodedImageData)
+                            && page.EncodedDisplayImageDataEquals(encodedDisplayImageData)
                             && GetDecodedImageIndexes().Contains(page.Index))
                         {
                             page.SetDisplayImage(image, _pageWidth);
