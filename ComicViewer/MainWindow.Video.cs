@@ -396,7 +396,7 @@ public partial class MainWindow
     {
         return Pages
             .Where(page => page.IsVideo
-                && !page.HasVideoFrame
+                && !page.HasDisplayImage
                 && page.CoverLoadStatus != VideoCoverLoadStatus.Failed
                 && page.CoverLoadStatus != VideoCoverLoadStatus.Oversized
                 && TryGetCachedVideoData(page.EntryKey).HasValue)
@@ -494,7 +494,7 @@ public partial class MainWindow
     private void StoreVideoCoverFrame(ComicPage page, VideoCoverFrame coverFrame)
     {
         var frame = coverFrame.Frame;
-        page.SetVideoFrame(frame);
+        page.SetDisplayImage(frame, _pageWidth);
         if (coverFrame.VideoWidth > 0)
         {
             page.SetAspectRatio((double)coverFrame.VideoHeight / coverFrame.VideoWidth, _pageWidth);
@@ -504,11 +504,13 @@ public partial class MainWindow
             page.SetAspectRatio(frame.Height / frame.Width, _pageWidth);
         }
 
+        page.SetCoverLoadStatus(VideoCoverLoadStatus.Success);
+
         lock (_cacheLock)
         {
             if (_mediaCache.TryGetValue(page.EntryKey, out var cachedMedia))
             {
-                _mediaCache[page.EntryKey] = cachedMedia with { VideoFrame = frame };
+                _mediaCache[page.EntryKey] = cachedMedia with { DisplayImage = frame };
             }
         }
     }

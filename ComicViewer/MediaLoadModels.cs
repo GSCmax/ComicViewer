@@ -8,7 +8,7 @@ internal sealed record CachedMedia(
     ComicMediaType Type,
     ArraySegment<byte>? ImageData,
     ArraySegment<byte>? VideoData,
-    ImageSource? VideoFrame,
+    ImageSource? DisplayImage,
     long EstimatedBytes);
 
 internal sealed record KnownPasswordResult(string Password, ArchiveSession Session);

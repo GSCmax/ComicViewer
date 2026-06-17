@@ -361,9 +361,10 @@ public partial class MainWindow
         {
             page.SetEncodedImageData(imageData);
         }
-        else if (cachedMedia.Type == ComicMediaType.Video && cachedMedia.VideoFrame is not null)
+        else if (cachedMedia.Type == ComicMediaType.Video && cachedMedia.DisplayImage is not null)
         {
-            page.SetVideoFrame(cachedMedia.VideoFrame);
+            page.SetDisplayImage(cachedMedia.DisplayImage, _pageWidth);
+            page.SetCoverLoadStatus(VideoCoverLoadStatus.Success);
         }
         else if (cachedMedia.Type == ComicMediaType.Video && cachedMedia.VideoData is not null)
         {
@@ -379,9 +380,9 @@ public partial class MainWindow
             return;
         }
 
-        foreach (var page in Pages.Where(page => page.IsImage && page.Image is not null))
+        foreach (var page in Pages.Where(page => page.IsImage && page.DisplayImage is not null))
         {
-            page.ClearImage(_pageWidth);
+            page.ClearDisplayImage(_pageWidth);
         }
     }
 
@@ -407,7 +408,7 @@ public partial class MainWindow
         foreach (var page in Pages)
         {
             page.ClearEncodedImageData();
-            page.ClearVideoFrame();
+            page.ClearDisplayImage(_pageWidth);
         }
     }
 
@@ -513,9 +514,9 @@ public partial class MainWindow
     private void ReleaseDecodedImagesOutsideRange()
     {
         var keepDecoded = GetDecodedImageIndexes();
-        foreach (var page in Pages.Where(page => page.IsImage && page.Image is not null && !keepDecoded.Contains(page.Index)))
+        foreach (var page in Pages.Where(page => page.IsImage && page.DisplayImage is not null && !keepDecoded.Contains(page.Index)))
         {
-            page.ClearImage(_pageWidth);
+            page.ClearDisplayImage(_pageWidth);
         }
     }
 
@@ -529,7 +530,7 @@ public partial class MainWindow
     private void DecodeVisibleImages()
     {
         var decodePixelWidth = GetDecodePixelWidth();
-        foreach (var page in GetDecodedImageIndexes().Select(index => Pages[index]).Where(page => page.IsImage && page.Image is null && page.EncodedImageData is not null))
+        foreach (var page in GetDecodedImageIndexes().Select(index => Pages[index]).Where(page => page.IsImage && page.DisplayImage is null && page.EncodedImageData is not null))
         {
             lock (_cacheLock)
             {
@@ -559,7 +560,7 @@ public partial class MainWindow
                             && page.EncodedImageDataEquals(encodedImageData)
                             && GetDecodedImageIndexes().Contains(page.Index))
                         {
-                            page.SetImage(image, _pageWidth);
+                            page.SetDisplayImage(image, _pageWidth);
                         }
                         else
                         {

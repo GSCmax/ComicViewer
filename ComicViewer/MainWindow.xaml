@@ -67,15 +67,6 @@
             <Setter Property="UseLayoutRounding" Value="True" />
         </Style>
 
-        <Style x:Key="ImagePageVisibilityStyle" TargetType="{x:Type Image}">
-            <Setter Property="Visibility" Value="Collapsed" />
-            <Style.Triggers>
-                <DataTrigger Binding="{Binding IsImage}" Value="True">
-                    <Setter Property="Visibility" Value="Visible" />
-                </DataTrigger>
-            </Style.Triggers>
-        </Style>
-
         <Style x:Key="VideoSurfaceVisibilityStyle" TargetType="{x:Type Grid}">
             <Setter Property="Visibility" Value="Collapsed" />
             <Style.Triggers>
@@ -89,15 +80,6 @@
             <Setter Property="Visibility" Value="Collapsed" />
             <Style.Triggers>
                 <DataTrigger Binding="{Binding IsPlaybackHostVisible}" Value="True">
-                    <Setter Property="Visibility" Value="Visible" />
-                </DataTrigger>
-            </Style.Triggers>
-        </Style>
-
-        <Style x:Key="VideoFrameVisibilityStyle" TargetType="{x:Type Image}">
-            <Setter Property="Visibility" Value="Collapsed" />
-            <Style.Triggers>
-                <DataTrigger Binding="{Binding ShouldShowVideoFrame}" Value="True">
                     <Setter Property="Visibility" Value="Visible" />
                 </DataTrigger>
             </Style.Triggers>
@@ -531,9 +513,12 @@
                     <Grid Width="{Binding DisplayWidth}"
                           Height="{Binding DisplayHeight}"
                           Style="{StaticResource PageContainerGridStyle}">
-                        <Image Source="{Binding Image}"
-                               Stretch="Fill"
-                               Style="{StaticResource ImagePageVisibilityStyle}" />
+                        <Image Source="{Binding DisplayImage}"
+                               Width="{Binding DisplayWidth}"
+                               Height="{Binding DisplayHeight}"
+                               HorizontalAlignment="Left"
+                               VerticalAlignment="Top"
+                               Stretch="Fill" />
 
                         <Grid Background="{DynamicResource TransparentBrush}"
                               MouseLeftButtonDown="VideoSurface_MouseLeftButtonDown"
@@ -547,16 +532,6 @@
                                             Panel.ZIndex="0"
                                             Content="{Binding PlaybackElement}"
                                             Style="{StaticResource VideoPlaybackHostVisibilityStyle}" />
-
-                            <Image Source="{Binding VideoFrame}"
-                                   Width="{Binding PlaybackHostWidth}"
-                                   Height="{Binding PlaybackHostHeight}"
-                                   HorizontalAlignment="Left"
-                                   VerticalAlignment="Top"
-                                   Stretch="Fill"
-                                   IsHitTestVisible="False"
-                                   Panel.ZIndex="1"
-                                   Style="{StaticResource VideoFrameVisibilityStyle}" />
 
                             <Button HorizontalAlignment="Center"
                                     VerticalAlignment="Center"

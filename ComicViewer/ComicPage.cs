@@ -3,7 +3,6 @@ using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Media;
-using System.Windows.Media.Imaging;
 
 namespace ComicViewer;
 
@@ -13,9 +12,8 @@ public sealed class ComicPage : INotifyPropertyChanged
     private const double DefaultVideoAspectRatio = 9d / 16d;
 
     private ArraySegment<byte>? _encodedImageData;
-    private BitmapImage? _image;
+    private ImageSource? _displayImage;
     private MpvVideoPlayerControl? _videoPlayer;
-    private ImageSource? _videoFrame;
     private long _videoPositionMs;
     private long _videoDurationMs;
     private double _aspectRatio;
@@ -47,9 +45,7 @@ public sealed class ComicPage : INotifyPropertyChanged
 
     public bool IsVideo => MediaType == ComicMediaType.Video;
 
-    public bool IsLoaded => IsImage
-        ? Image is not null
-        : VideoFrame is not null || _videoPlayer?.HasRenderedFirstFrame == true;
+    public bool IsLoaded => DisplayImage is not null || _videoPlayer?.HasRenderedFirstFrame == true;
 
     public ArraySegment<byte>? EncodedImageData => _encodedImageData;
 
@@ -68,44 +64,27 @@ public sealed class ComicPage : INotifyPropertyChanged
 
     public double PlaybackHostHeight => DisplayHeight;
 
-    public BitmapImage? Image
+    public ImageSource? DisplayImage
     {
-        get => _image;
+        get => _displayImage;
         private set
         {
-            if (!ReferenceEquals(_image, value))
+            if (!ReferenceEquals(_displayImage, value))
             {
-                _image = value;
+                _displayImage = value;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(IsLoaded));
             }
         }
     }
 
-    public ImageSource? VideoFrame
-    {
-        get => _videoFrame;
-        private set
-        {
-            if (!ReferenceEquals(_videoFrame, value))
-            {
-                _videoFrame = value;
-                OnPropertyChanged();
-                OnPropertyChanged(nameof(IsLoaded));
-                OnPropertyChanged(nameof(ShouldShowVideoFrame));
-            }
-        }
-    }
-
-    public bool HasVideoFrame => VideoFrame is not null;
+    public bool HasDisplayImage => DisplayImage is not null;
 
     public bool IsVideoPlaying => _videoPlayer?.IsPlaying == true;
 
     public bool IsVideoPreparing => _videoPlayer?.IsPreparing == true;
 
     public bool IsVideoPaused => _videoPlayer?.IsPaused == true;
-
-    public bool ShouldShowVideoFrame => VideoFrame is not null && _videoPlayer?.HasRenderedFirstFrame != true;
 
     public VideoCoverLoadStatus CoverLoadStatus => _coverLoadStatus;
 
@@ -154,20 +133,20 @@ public sealed class ComicPage : INotifyPropertyChanged
         }
     }
 
-    public void SetImage(BitmapImage? image, double pageWidth)
+    public void SetDisplayImage(ImageSource? image, double pageWidth)
     {
-        Image = image;
-        if (image?.PixelWidth > 0)
+        DisplayImage = image;
+        if (image?.Width > 0)
         {
-            _aspectRatio = (double)image.PixelHeight / image.PixelWidth;
+            _aspectRatio = image.Height / image.Width;
         }
 
         Resize(pageWidth);
     }
 
-    public void ClearImage(double pageWidth)
+    public void ClearDisplayImage(double pageWidth)
     {
-        Image = null;
+        DisplayImage = null;
         Resize(pageWidth);
     }
 
@@ -194,20 +173,7 @@ public sealed class ComicPage : INotifyPropertyChanged
     public void ClearEncodedImageData()
     {
         _encodedImageData = null;
-        Image = null;
-    }
-
-    public void SetVideoFrame(ImageSource frame)
-    {
-        SetCoverLoadStatus(VideoCoverLoadStatus.Success);
-        VideoFrame = frame;
-        OnPropertyChanged(nameof(VideoOverlayText));
-    }
-
-    public void ClearVideoFrame()
-    {
-        VideoFrame = null;
-        OnPropertyChanged(nameof(VideoOverlayText));
+        DisplayImage = null;
     }
 
     public void SetCoverLoadStatus(VideoCoverLoadStatus status)
@@ -318,7 +284,6 @@ public sealed class ComicPage : INotifyPropertyChanged
         OnPropertyChanged(nameof(PlaybackHostHeight));
         OnPropertyChanged(nameof(VideoOverlayText));
         OnPropertyChanged(nameof(IsLoaded));
-        OnPropertyChanged(nameof(ShouldShowVideoFrame));
     }
 
     private static string FormatVideoTime(long milliseconds)
