@@ -2,7 +2,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
-using System.Windows.Media;
+using System.Windows.Media.Imaging;
 
 namespace ComicViewer;
 
@@ -373,7 +373,8 @@ public partial class MainWindow
                 }
                 else
                 {
-                    StoreVideoCoverFrame(page, coverFrame);
+                    var coverImageData = await Task.Run(() => EncodeBitmapAsPng(coverFrame.Frame), cancellationToken);
+                    StoreVideoCoverFrame(page, new VideoCoverImage(coverImageData, coverFrame.VideoWidth, coverFrame.VideoHeight, coverFrame.Frame.PixelWidth, coverFrame.Frame.PixelHeight));
                 }
 
                 UpdateReadingStatus(GetCurrentPageIndex());
@@ -400,6 +401,7 @@ public partial class MainWindow
         return Pages
             .Where(page => page.IsVideo
                 && !page.HasDisplayImage
+                && !page.HasEncodedImageData
                 && page.CoverLoadStatus != VideoCoverLoadStatus.Failed
                 && page.CoverLoadStatus != VideoCoverLoadStatus.Oversized
                 && TryGetCachedVideoData(page.EntryKey).HasValue)
@@ -511,33 +513,51 @@ public partial class MainWindow
             && string.Equals(_archivePath, archivePath, StringComparison.Ordinal);
     }
 
-    private void StoreVideoCoverFrame(ComicPage page, VideoCoverFrame coverFrame)
+    private void StoreVideoCoverFrame(ComicPage page, VideoCoverImage coverImage)
     {
-        var frame = coverFrame.Frame;
-        page.SetDisplayImage(frame, _pageWidth);
-        if (coverFrame.VideoWidth > 0)
+        page.SetEncodedImageData(coverImage.ImageData);
+        if (coverImage.VideoWidth > 0)
         {
-            page.SetAspectRatio((double)coverFrame.VideoHeight / coverFrame.VideoWidth, _pageWidth);
+            page.SetAspectRatio((double)coverImage.VideoHeight / coverImage.VideoWidth, _pageWidth);
             InvalidateViewportSnapshot();
         }
-        else if (frame.Width > 0)
+        else if (coverImage.PixelWidth > 0)
         {
-            page.SetAspectRatio(frame.Height / frame.Width, _pageWidth);
+            page.SetAspectRatio((double)coverImage.PixelHeight / coverImage.PixelWidth, _pageWidth);
             InvalidateViewportSnapshot();
         }
 
         page.SetCoverLoadStatus(VideoCoverLoadStatus.Success);
+        ScheduleDecodeVisibleImages();
 
         lock (_cacheLock)
         {
             if (_mediaCache.TryGetValue(page.EntryKey, out var cachedMedia))
             {
-                _mediaCache[page.EntryKey] = cachedMedia with { DisplayImage = frame };
+                var previousCoverBytes = cachedMedia.CoverImageData?.Count ?? 0;
+                var coverBytesDelta = coverImage.ImageData.Count - previousCoverBytes;
+                _mediaCache[page.EntryKey] = cachedMedia with
+                {
+                    CoverImageData = coverImage.ImageData,
+                    EstimatedBytes = cachedMedia.EstimatedBytes + coverBytesDelta
+                };
+                _cacheBytes += coverBytesDelta;
             }
         }
     }
 
-    private sealed record VideoCoverFrame(ImageSource Frame, long VideoWidth, long VideoHeight);
+    private static ArraySegment<byte> EncodeBitmapAsPng(BitmapSource bitmap)
+    {
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        using var stream = new MemoryStream();
+        encoder.Save(stream);
+        return new ArraySegment<byte>(stream.ToArray());
+    }
+
+    private sealed record VideoCoverFrame(BitmapSource Frame, long VideoWidth, long VideoHeight);
+
+    private sealed record VideoCoverImage(ArraySegment<byte> ImageData, long VideoWidth, long VideoHeight, int PixelWidth, int PixelHeight);
 
     private ArraySegment<byte>? TryGetCachedVideoData(string entryKey)
     {
