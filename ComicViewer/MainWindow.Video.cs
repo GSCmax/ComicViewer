@@ -218,6 +218,7 @@ public partial class MainWindow
             if (page?.VideoPlayer == player && width > 0)
             {
                 page.SetAspectRatio((double)height / width, _pageWidth);
+                InvalidateViewportSnapshot();
             }
         }));
 
@@ -517,10 +518,12 @@ public partial class MainWindow
         if (coverFrame.VideoWidth > 0)
         {
             page.SetAspectRatio((double)coverFrame.VideoHeight / coverFrame.VideoWidth, _pageWidth);
+            InvalidateViewportSnapshot();
         }
         else if (frame.Width > 0)
         {
             page.SetAspectRatio(frame.Height / frame.Width, _pageWidth);
+            InvalidateViewportSnapshot();
         }
 
         page.SetCoverLoadStatus(VideoCoverLoadStatus.Success);

@@ -240,6 +240,7 @@ public partial class MainWindow
         if (TryReadImageAspectRatio(imageData) is { } aspectRatio)
         {
             page.SetAspectRatio(aspectRatio, _pageWidth);
+            InvalidateViewportSnapshot();
         }
     }
 
@@ -306,32 +307,36 @@ public partial class MainWindow
         }
 
         var evictedBytes = 0L;
-        while (true)
+        var evictedMedia = new List<CachedMedia>();
+        lock (_cacheLock)
         {
-            CachedMedia? evicted;
-            lock (_cacheLock)
+            if (_cacheBytes > MaxMediaCacheBytes)
             {
-                if (_cacheBytes <= MaxMediaCacheBytes)
-                {
-                    break;
-                }
-
-                evicted = _mediaCache.Values
+                var candidates = _mediaCache.Values
                     .Where(entry => !protectedIndexes.Contains(entry.PageIndex))
                     .OrderByDescending(entry => Math.Abs(entry.PageIndex - _currentPageIndex))
                     .ThenByDescending(entry => entry.EstimatedBytes)
-                    .FirstOrDefault();
+                    .ToList();
 
-                if (evicted is null)
+                foreach (var evicted in candidates)
                 {
-                    break;
+                    if (_cacheBytes <= MaxMediaCacheBytes)
+                    {
+                        break;
+                    }
+
+                    if (_mediaCache.Remove(evicted.EntryKey))
+                    {
+                        _cacheBytes -= evicted.EstimatedBytes;
+                        evictedBytes += evicted.EstimatedBytes;
+                        evictedMedia.Add(evicted);
+                    }
                 }
-
-                _mediaCache.Remove(evicted.EntryKey);
-                _cacheBytes -= evicted.EstimatedBytes;
-                evictedBytes += evicted.EstimatedBytes;
             }
+        }
 
+        foreach (var evicted in evictedMedia)
+        {
             ClearPageMedia(evicted);
         }
 
@@ -382,6 +387,7 @@ public partial class MainWindow
         else if (cachedMedia.Type == ComicMediaType.Video && cachedMedia.DisplayImage is not null)
         {
             page.SetDisplayImage(cachedMedia.DisplayImage, _pageWidth);
+            InvalidateViewportSnapshot();
             page.SetCoverLoadStatus(VideoCoverLoadStatus.Success);
         }
         else if (cachedMedia.Type == ComicMediaType.Video && cachedMedia.VideoData is not null)
@@ -579,6 +585,7 @@ public partial class MainWindow
                             && GetDecodedImageIndexes().Contains(page.Index))
                         {
                             page.SetDisplayImage(image, _pageWidth);
+                            InvalidateViewportSnapshot();
                         }
                         else
                         {

@@ -34,8 +34,11 @@ public partial class MainWindow : Window
     private ScrollViewer? _pagesScrollViewer;
     private MpvVideoPlayerControl? _sharedVideoPlayer;
     private ComicPage? _sharedVideoPage;
+    private HashSet<int> _realizedPageIndexesSnapshot = [];
+    private HashSet<int> _visiblePageIndexesSnapshot = [];
     private string? _archivePath;
     private double _pageWidth = 800;
+    private int? _firstVisiblePageIndexSnapshot;
     private int _cacheGeneration;
     private int _currentPageIndex;
     private long _cacheBytes;
@@ -43,6 +46,7 @@ public partial class MainWindow : Window
     private DateTime _lastCacheTrimUtc = DateTime.MinValue;
     private DateTime _lastScrollUtc = DateTime.MinValue;
     private bool _isLoadingArchive;
+    private bool _viewportSnapshotDirty = true;
 
     public ObservableCollection<ComicPage> Pages { get; } = [];
 
@@ -331,6 +335,7 @@ public partial class MainWindow : Window
         {
             Pages.Add(page);
         }
+        InvalidateViewportSnapshot();
 
         GetPagesScrollViewer()?.ScrollToTop();
         if (Pages.Count == 0)
@@ -361,6 +366,7 @@ public partial class MainWindow : Window
         StopAllVideos();
         DisposeArchiveSession();
         Pages.Clear();
+        InvalidateViewportSnapshot();
     }
 
     private void DisposeArchiveSession()
