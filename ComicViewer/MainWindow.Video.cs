@@ -327,6 +327,7 @@ public partial class MainWindow
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                await WaitForVideoCoverIdleAsync(cancellationToken);
                 if (!IsVideoCoverRequestCurrent(coverCts, archivePath))
                 {
                     return;
@@ -375,6 +376,7 @@ public partial class MainWindow
                 }
 
                 UpdateReadingStatus(GetCurrentPageIndex());
+                await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -403,6 +405,23 @@ public partial class MainWindow
             .OrderBy(page => Math.Abs(page.Index - _currentPageIndex))
             .ThenBy(page => page.Index)
             .FirstOrDefault();
+    }
+
+    private async Task WaitForVideoCoverIdleAsync(CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var elapsedSinceScroll = DateTime.UtcNow - _lastScrollUtc;
+            var remainingDelay = TimeSpan.FromMilliseconds(VideoCoverIdleDelayMilliseconds) - elapsedSinceScroll;
+            if (remainingDelay <= TimeSpan.Zero)
+            {
+                await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+                return;
+            }
+
+            await Task.Delay(remainingDelay, cancellationToken);
+        }
     }
 
     private async Task<VideoCoverFrame?> RenderVideoCoverFrameAsync(

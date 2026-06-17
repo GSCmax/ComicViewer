@@ -21,6 +21,7 @@ public partial class MainWindow
             return;
         }
 
+        _lastScrollUtc = DateTime.UtcNow;
         var currentPageIndex = GetCurrentPageIndex();
         _currentPageIndex = currentPageIndex;
         UpdateReadingStatus(currentPageIndex);
@@ -223,6 +224,65 @@ public partial class MainWindow
             if (index >= 0 && index < Pages.Count)
             {
                 indexes.Add(index);
+            }
+        }
+
+        return indexes;
+    }
+
+    private HashSet<int> GetVisiblePageIndexes(int adjacentPages)
+    {
+        var indexes = new HashSet<int>();
+        var scrollViewer = GetPagesScrollViewer();
+        if (scrollViewer is null || Pages.Count == 0)
+        {
+            return indexes;
+        }
+
+        foreach (var container in FindVisualChildren<ListBoxItem>(PagesListBox))
+        {
+            var index = PagesListBox.ItemContainerGenerator.IndexFromContainer(container);
+            if (index < 0 || index >= Pages.Count || container.ActualHeight <= 0)
+            {
+                continue;
+            }
+
+            Rect bounds;
+            try
+            {
+                bounds = container.TransformToAncestor(scrollViewer)
+                    .TransformBounds(new Rect(0, 0, container.ActualWidth, container.ActualHeight));
+            }
+            catch (InvalidOperationException)
+            {
+                continue;
+            }
+
+            if (bounds.Bottom > 0 && bounds.Top < scrollViewer.ViewportHeight)
+            {
+                indexes.Add(index);
+            }
+        }
+
+        if (indexes.Count == 0)
+        {
+            indexes.Add(Math.Clamp(_currentPageIndex, 0, Pages.Count - 1));
+        }
+
+        var visible = indexes.ToArray();
+        foreach (var index in visible)
+        {
+            for (var offset = 1; offset <= adjacentPages; offset++)
+            {
+                if (index - offset >= 0)
+                {
+                    indexes.Add(index - offset);
+                }
+
+                if (index + offset < Pages.Count)
+                {
+                    indexes.Add(index + offset);
+                }
             }
         }
 

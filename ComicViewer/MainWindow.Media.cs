@@ -214,10 +214,9 @@ public partial class MainWindow
 
         var page = Pages[request.PageIndex];
         StoreCachedMedia(new CachedMedia(page.EntryKey, request.PageIndex, page.MediaType, imageData, null, null, imageData.Count), request);
-        page.SetEncodedImageData(imageData);
+        ApplyLoadedImageData(page, imageData);
         ScheduleDecodeVisibleImages();
-        EvictMediaOverBudget();
-        UpdateReadingStatus(GetCurrentPageIndex());
+        CompleteAcceptedMedia();
     }
 
     private void AcceptVideo(MediaLoadRequest request, ArraySegment<byte> videoData, int generation)
@@ -230,8 +229,23 @@ public partial class MainWindow
 
         var page = Pages[request.PageIndex];
         StoreCachedMedia(new CachedMedia(page.EntryKey, request.PageIndex, page.MediaType, null, videoData, null, videoData.Count), request);
-        page.SetCoverLoadStatus(VideoCoverLoadStatus.Loading);
+        ApplyLoadedVideoData(page);
         ScheduleVideoCoverGeneration();
+        CompleteAcceptedMedia();
+    }
+
+    private void ApplyLoadedImageData(ComicPage page, ArraySegment<byte> imageData)
+    {
+        page.SetEncodedImageData(imageData);
+    }
+
+    private static void ApplyLoadedVideoData(ComicPage page)
+    {
+        page.SetCoverLoadStatus(VideoCoverLoadStatus.Loading);
+    }
+
+    private void CompleteAcceptedMedia()
+    {
         EvictMediaOverBudget();
         UpdateReadingStatus(GetCurrentPageIndex());
     }
@@ -441,7 +455,7 @@ public partial class MainWindow
 
     private HashSet<int> GetDecodedImageIndexes()
     {
-        var indexes = GetRealizedPageIndexes();
+        var indexes = GetVisiblePageIndexes(adjacentPages: 1);
         if (indexes.Count == 0 && Pages.Count > 0)
         {
             indexes.Add(_currentPageIndex);

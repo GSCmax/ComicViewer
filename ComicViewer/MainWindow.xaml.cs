@@ -14,6 +14,7 @@ public partial class MainWindow : Window
     private const long MaxMediaCacheBytes = 512L * 1024 * 1024;
     private const long MaxInMemoryVideoPlaybackBytes = MaxMediaCacheBytes;
     private const int ImageDecodeDebounceMilliseconds = 50;
+    private const int VideoCoverIdleDelayMilliseconds = 350;
     private const double MouseWheelScrollMultiplier = 5d;
     private const double MouseWheelPixelsPerLine = 16d;
 
@@ -40,6 +41,7 @@ public partial class MainWindow : Window
     private long _cacheBytes;
     private long _reservedCacheBytes;
     private DateTime _lastCacheTrimUtc = DateTime.MinValue;
+    private DateTime _lastScrollUtc = DateTime.MinValue;
     private bool _isLoadingArchive;
 
     public ObservableCollection<ComicPage> Pages { get; } = [];
