@@ -6,7 +6,7 @@
         xmlns:local="clr-namespace:ComicViewer"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         mc:Ignorable="d"
-        Title="ComicViewer" Height="1000" Width="700" MinHeight="400" MinWidth="280" WindowStartupLocation="CenterScreen"
+        Title="ComicViewer" Height="1000" Width="700" MinHeight="400" MinWidth="520" WindowStartupLocation="CenterScreen"
         Background="{DynamicResource SurfaceBrush}"
         ResizeMode="CanResize"
         WindowStyle="None"
@@ -136,6 +136,42 @@
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter TargetName="PasswordBorder" Property="Opacity" Value="0.55" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="PageNumberTextBoxStyle" TargetType="{x:Type TextBox}">
+            <Setter Property="Height" Value="28" />
+            <Setter Property="Padding" Value="2,0" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="Background" Value="{StaticResource BackgroundBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CaretBrush" Value="{StaticResource TextPrimaryBrush}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type TextBox}">
+                        <Border x:Name="TextBoxBorder"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="5"
+                                SnapsToDevicePixels="True">
+                            <ScrollViewer x:Name="PART_ContentHost"
+                                          Margin="{TemplateBinding Padding}"
+                                          VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                                <Setter TargetName="TextBoxBorder" Property="BorderBrush" Value="{StaticResource OverlayBorderStrongBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="TextBoxBorder" Property="Opacity" Value="0.55" />
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -494,7 +530,37 @@
                     Style="{StaticResource CaptionButtonStyle}"
                     Click="MinimizeWindowButton_Click"
                     Content="&#xE921;" />
+            <StackPanel x:Name="ReadingProgressPanel"
+                        DockPanel.Dock="Right"
+                        Margin="8,0,6,0"
+                        VerticalAlignment="Center"
+                        Orientation="Horizontal">
+                <TextBox x:Name="CurrentPageTextBox"
+                         Width="52"
+                         shell:WindowChrome.IsHitTestVisibleInChrome="True"
+                         Style="{StaticResource PageNumberTextBoxStyle}"
+                         IsEnabled="False"
+                         Text=""
+                         GotKeyboardFocus="CurrentPageTextBox_GotKeyboardFocus"
+                         KeyDown="CurrentPageTextBox_KeyDown"
+                         LostKeyboardFocus="CurrentPageTextBox_LostKeyboardFocus"
+                         PreviewTextInput="CurrentPageTextBox_PreviewTextInput" />
+                <TextBlock x:Name="TotalPagesTextBlock"
+                           MinWidth="52"
+                           Margin="6,0,12,0"
+                           VerticalAlignment="Center"
+                           Foreground="{DynamicResource TextMutedBrush}"
+                           Text="/ 0" />
+                <TextBlock x:Name="LoadedRangeTextBlock"
+                           MinWidth="76"
+                           VerticalAlignment="Center"
+                           TextAlignment="Right"
+                           TextTrimming="CharacterEllipsis"
+                           Foreground="{DynamicResource TextMutedBrush}"
+                           Text="0" />
+            </StackPanel>
             <TextBlock x:Name="StatusTextBlock"
+                       Margin="0,0,6,0"
                        VerticalAlignment="Center"
                        Foreground="{DynamicResource TextMutedBrush}"
                        TextTrimming="CharacterEllipsis"

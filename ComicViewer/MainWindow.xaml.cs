@@ -367,6 +367,7 @@ public partial class MainWindow : Window
         DisposeArchiveSession();
         Pages.Clear();
         InvalidateViewportSnapshot();
+        ClearReadingProgress();
     }
 
     private void DisposeArchiveSession()

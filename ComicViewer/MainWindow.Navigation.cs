@@ -311,10 +311,19 @@ public partial class MainWindow
     {
         if (_archivePath is null || Pages.Count == 0)
         {
+            ClearReadingProgress();
             return;
         }
 
-        StatusTextBlock.Text = $"{Path.GetFileName(_archivePath)} - 第 {currentPageIndex + 1}/{Pages.Count} 页，已载入 {GetLoadedRangeText()}，已缓存 {FormatByteSize(GetCacheBytes())}/{FormatByteSize(MaxMediaCacheBytes)}";
+        StatusTextBlock.Text = Path.GetFileName(_archivePath);
+        CurrentPageTextBox.IsEnabled = true;
+        if (!CurrentPageTextBox.IsKeyboardFocusWithin)
+        {
+            CurrentPageTextBox.Text = (currentPageIndex + 1).ToString(CultureInfo.InvariantCulture);
+        }
+
+        TotalPagesTextBlock.Text = $"/ {Pages.Count.ToString(CultureInfo.InvariantCulture)}";
+        LoadedRangeTextBlock.Text = GetLoadedRangeText();
     }
 
     private string GetLoadedRangeText()
@@ -330,14 +339,72 @@ public partial class MainWindow
 
         return loaded.Count == 1
             ? loaded[0].ToString(CultureInfo.InvariantCulture)
-            : $"{loaded.Min()}-{loaded.Max()} ({loaded.Count})";
+            : $"{loaded.Min()}-{loaded.Max()}";
     }
 
-    private long GetCacheBytes()
+    private void ClearReadingProgress()
     {
-        lock (_cacheLock)
+        CurrentPageTextBox.IsEnabled = false;
+        CurrentPageTextBox.Text = "";
+        TotalPagesTextBlock.Text = "/ 0";
+        LoadedRangeTextBlock.Text = "0";
+    }
+
+    private void CurrentPageTextBox_GotKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        CurrentPageTextBox.SelectAll();
+    }
+
+    private void CurrentPageTextBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter)
         {
-            return _cacheBytes;
+            CommitPageNumberInput();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Escape)
+        {
+            if (Pages.Count > 0)
+            {
+                UpdateReadingStatus(Math.Clamp(_currentPageIndex, 0, Pages.Count - 1));
+            }
+            else
+            {
+                ClearReadingProgress();
+            }
+
+            Keyboard.ClearFocus();
+            e.Handled = true;
+        }
+    }
+
+    private void CurrentPageTextBox_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        CommitPageNumberInput();
+    }
+
+    private void CurrentPageTextBox_PreviewTextInput(object sender, TextCompositionEventArgs e)
+    {
+        e.Handled = !e.Text.All(char.IsDigit);
+    }
+
+    private void CommitPageNumberInput()
+    {
+        if (Pages.Count == 0)
+        {
+            ClearReadingProgress();
+            return;
+        }
+
+        if (int.TryParse(CurrentPageTextBox.Text.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out var pageNumber))
+        {
+            var targetIndex = Math.Clamp(pageNumber - 1, 0, Pages.Count - 1);
+            CurrentPageTextBox.Text = (targetIndex + 1).ToString(CultureInfo.InvariantCulture);
+            ScrollPageToTop(targetIndex);
+        }
+        else
+        {
+            UpdateReadingStatus(Math.Clamp(_currentPageIndex, 0, Pages.Count - 1));
         }
     }
 
