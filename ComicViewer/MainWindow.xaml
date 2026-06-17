@@ -549,7 +549,11 @@
                                             Style="{StaticResource VideoPlaybackHostVisibilityStyle}" />
 
                             <Image Source="{Binding VideoFrame}"
-                                   Stretch="Uniform"
+                                   Width="{Binding PlaybackHostWidth}"
+                                   Height="{Binding PlaybackHostHeight}"
+                                   HorizontalAlignment="Left"
+                                   VerticalAlignment="Top"
+                                   Stretch="Fill"
                                    IsHitTestVisible="False"
                                    Panel.ZIndex="1"
                                    Style="{StaticResource VideoFrameVisibilityStyle}" />

@@ -8,6 +8,8 @@ namespace ComicViewer;
 
 public partial class MainWindow
 {
+    private const double VideoCoverCaptureWidth = 480d;
+
     private async void PlayVideoButton_Click(object sender, RoutedEventArgs e)
     {
         if (_isLoadingArchive || sender is not Button { CommandParameter: ComicPage page } button || !page.IsVideo)
@@ -350,10 +352,10 @@ public partial class MainWindow
                 }
 
                 page.SetCoverLoadStatus(VideoCoverLoadStatus.Loading);
-                ImageSource? frame;
+                VideoCoverFrame? coverFrame;
                 try
                 {
-                    frame = await RenderVideoCoverFrameAsync(page, videoData.Value, coverCts, archivePath);
+                    coverFrame = await RenderVideoCoverFrameAsync(page, videoData.Value, coverCts, archivePath);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
@@ -361,7 +363,7 @@ public partial class MainWindow
                 }
                 catch
                 {
-                    frame = null;
+                    coverFrame = null;
                 }
 
                 cancellationToken.ThrowIfCancellationRequested();
@@ -370,13 +372,13 @@ public partial class MainWindow
                     return;
                 }
 
-                if (frame is null)
+                if (coverFrame is null)
                 {
                     page.SetCoverLoadStatus(VideoCoverLoadStatus.Failed);
                 }
                 else
                 {
-                    StoreVideoCoverFrame(page, frame);
+                    StoreVideoCoverFrame(page, coverFrame);
                 }
 
                 UpdateReadingStatus(GetCurrentPageIndex());
@@ -410,7 +412,7 @@ public partial class MainWindow
             .FirstOrDefault();
     }
 
-    private async Task<ImageSource?> RenderVideoCoverFrameAsync(
+    private async Task<VideoCoverFrame?> RenderVideoCoverFrameAsync(
         ComicPage page,
         ArraySegment<byte> videoData,
         CancellationTokenSource coverCts,
@@ -419,8 +421,15 @@ public partial class MainWindow
         var player = _sharedVideoPlayer ?? throw new InvalidOperationException("共享播放器尚未初始化。");
         var cancellationToken = coverCts.Token;
         var firstFrame = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        long videoWidth = 0;
+        long videoHeight = 0;
 
         void OnFirstFrameRendered() => firstFrame.TrySetResult();
+        void OnVideoSizeChanged(long width, long height)
+        {
+            videoWidth = width;
+            videoHeight = height;
+        }
 
         try
         {
@@ -436,21 +445,48 @@ public partial class MainWindow
             }
 
             player.FirstFrameRendered += OnFirstFrameRendered;
+            player.VideoSizeChanged += OnVideoSizeChanged;
             player.PrepareFirstFrame();
             await firstFrame.Task.WaitAsync(TimeSpan.FromSeconds(2), cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
-            return IsVideoCoverRequestCurrent(coverCts, archivePath)
+            await ResizeVideoCoverGeneratorHostAsync(videoWidth, videoHeight, cancellationToken);
+            var frame = IsVideoCoverRequestCurrent(coverCts, archivePath)
                 ? player.CaptureCurrentFrame()
                 : null;
+            return frame is null
+                ? null
+                : new VideoCoverFrame(frame, videoWidth, videoHeight);
         }
         finally
         {
             player.FirstFrameRendered -= OnFirstFrameRendered;
+            player.VideoSizeChanged -= OnVideoSizeChanged;
             if (ReferenceEquals(_videoCoverCts, coverCts))
             {
                 player.Stop();
             }
         }
+    }
+
+    private async Task ResizeVideoCoverGeneratorHostAsync(long videoWidth, long videoHeight, CancellationToken cancellationToken)
+    {
+        if (videoWidth <= 0 || videoHeight <= 0)
+        {
+            return;
+        }
+
+        var captureHeight = Math.Max(1d, Math.Round(VideoCoverCaptureWidth * videoHeight / videoWidth));
+        if (Math.Abs(VideoCoverGeneratorHost.Width - VideoCoverCaptureWidth) > 0.1
+            || Math.Abs(VideoCoverGeneratorHost.Height - captureHeight) > 0.1)
+        {
+            VideoCoverGeneratorHost.Width = VideoCoverCaptureWidth;
+            VideoCoverGeneratorHost.Height = captureHeight;
+            VideoCoverGeneratorHost.UpdateLayout();
+        }
+
+        _sharedVideoPlayer?.RequestRender();
+        await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.Render);
+        await Task.Delay(30, cancellationToken);
     }
 
     private bool IsVideoCoverRequestCurrent(CancellationTokenSource coverCts, string archivePath)
@@ -462,10 +498,15 @@ public partial class MainWindow
             && string.Equals(_archivePath, archivePath, StringComparison.Ordinal);
     }
 
-    private void StoreVideoCoverFrame(ComicPage page, ImageSource frame)
+    private void StoreVideoCoverFrame(ComicPage page, VideoCoverFrame coverFrame)
     {
+        var frame = coverFrame.Frame;
         page.SetVideoFrame(frame);
-        if (frame.Width > 0)
+        if (coverFrame.VideoWidth > 0)
+        {
+            page.SetAspectRatio((double)coverFrame.VideoHeight / coverFrame.VideoWidth, _pageWidth);
+        }
+        else if (frame.Width > 0)
         {
             page.SetAspectRatio(frame.Height / frame.Width, _pageWidth);
         }
@@ -478,6 +519,8 @@ public partial class MainWindow
             }
         }
     }
+
+    private sealed record VideoCoverFrame(ImageSource Frame, long VideoWidth, long VideoHeight);
 
     private ArraySegment<byte>? TryGetCachedVideoData(string entryKey)
     {

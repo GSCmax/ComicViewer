@@ -103,6 +103,12 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
         return VideoView.CaptureCurrentFrame();
     }
 
+    public void RequestRender()
+    {
+        ThrowIfDisposed();
+        VideoView.RequestRender();
+    }
+
     public async Task PlayAsync(CancellationToken cancellationToken = default)
     {
         await WaitForHostReadyAsync(TimeSpan.FromSeconds(2), cancellationToken);
