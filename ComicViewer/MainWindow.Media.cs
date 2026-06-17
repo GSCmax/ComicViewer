@@ -237,6 +237,10 @@ public partial class MainWindow
     private void ApplyLoadedImageData(ComicPage page, ArraySegment<byte> imageData)
     {
         page.SetEncodedImageData(imageData);
+        if (TryReadImageAspectRatio(imageData) is { } aspectRatio)
+        {
+            page.SetAspectRatio(aspectRatio, _pageWidth);
+        }
     }
 
     private static void ApplyLoadedVideoData(ComicPage page)
@@ -611,5 +615,27 @@ public partial class MainWindow
         image.EndInit();
         image.Freeze();
         return image;
+    }
+
+    private static double? TryReadImageAspectRatio(ArraySegment<byte> imageData)
+    {
+        try
+        {
+            using var stream = CreateReadOnlyMemoryStream(imageData);
+            var decoder = BitmapDecoder.Create(
+                stream,
+                BitmapCreateOptions.DelayCreation,
+                BitmapCacheOption.None);
+            var frame = decoder.Frames.FirstOrDefault();
+            if (frame?.PixelWidth > 0)
+            {
+                return (double)frame.PixelHeight / frame.PixelWidth;
+            }
+        }
+        catch
+        {
+        }
+
+        return null;
     }
 }
