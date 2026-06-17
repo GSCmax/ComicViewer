@@ -142,8 +142,8 @@ public partial class MainWindow
         PagesListBox.ScrollIntoView(Pages[pageIndex]);
         Dispatcher.BeginInvoke((Action)(() =>
         {
-            AlignRealizedPageToTop(pageIndex);
             InvalidateViewportSnapshot();
+            AlignRealizedPageToTop(pageIndex);
             _currentPageIndex = pageIndex;
             UpdateReadingStatus(pageIndex);
             StartMediaLoading(pageIndex);
