@@ -217,7 +217,7 @@ public partial class MainWindow
         var page = Pages[request.PageIndex];
         StoreCachedMedia(new CachedMedia(page.EntryKey, request.PageIndex, page.MediaType, imageData, null, null, imageData.Count), request);
         page.SetEncodedImageData(imageData);
-        DecodeVisibleImages();
+        ScheduleDecodeVisibleImages();
         EvictMediaOverBudget();
         UpdateReadingStatus(GetCurrentPageIndex());
     }
@@ -396,6 +396,7 @@ public partial class MainWindow
 
     private void ClearMediaCache(bool clearPages)
     {
+        CancelPendingImageDecode();
         lock (_cacheLock)
         {
             _mediaCache.Clear();
@@ -424,6 +425,7 @@ public partial class MainWindow
 
     private void StopMediaLoader()
     {
+        CancelPendingImageDecode();
         CancellationTokenSource? cts;
         lock (_cacheLock)
         {
@@ -473,7 +475,51 @@ public partial class MainWindow
     private void RefreshDecodedImages()
     {
         ReleaseDecodedImagesOutsideRange();
-        DecodeVisibleImages();
+        ScheduleDecodeVisibleImages();
+    }
+
+    private void ScheduleDecodeVisibleImages()
+    {
+        CancelPendingImageDecode();
+        var decodeCts = new CancellationTokenSource();
+        _imageDecodeDebounceCts = decodeCts;
+        var generation = _cacheGeneration;
+        _ = DecodeVisibleImagesAfterDelayAsync(generation, decodeCts);
+    }
+
+    private async Task DecodeVisibleImagesAfterDelayAsync(int generation, CancellationTokenSource decodeCts)
+    {
+        try
+        {
+            await Task.Delay(ImageDecodeDebounceMilliseconds, decodeCts.Token);
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (ReferenceEquals(_imageDecodeDebounceCts, decodeCts)
+                    && !decodeCts.IsCancellationRequested
+                    && generation == _cacheGeneration)
+                {
+                    _imageDecodeDebounceCts = null;
+                    DecodeVisibleImages();
+                }
+            }, System.Windows.Threading.DispatcherPriority.Background);
+        }
+        catch (OperationCanceledException) when (decodeCts.IsCancellationRequested)
+        {
+        }
+        finally
+        {
+            if (!ReferenceEquals(_imageDecodeDebounceCts, decodeCts))
+            {
+                decodeCts.Dispose();
+            }
+        }
+    }
+
+    private void CancelPendingImageDecode()
+    {
+        var decodeCts = _imageDecodeDebounceCts;
+        _imageDecodeDebounceCts = null;
+        decodeCts?.Cancel();
     }
 
     private void ReleaseDecodedImagesOutsideRange()
@@ -522,7 +568,7 @@ public partial class MainWindow
                         }
                         else
                         {
-                            DecodeVisibleImages();
+                            ScheduleDecodeVisibleImages();
                         }
                     }), System.Windows.Threading.DispatcherPriority.Background);
                 }
