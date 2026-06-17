@@ -33,7 +33,12 @@ public partial class MainWindow
 
     private void ImageScrollViewer_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
     {
-        CancelPageNumberInput();
+        NavigateByMouseWheel(e);
+    }
+
+    private void NavigateByMouseWheel(MouseWheelEventArgs e)
+    {
+        PrepareForReaderNavigationInput();
         var scrollViewer = GetPagesScrollViewer();
         if (scrollViewer is null)
         {
@@ -45,6 +50,22 @@ public partial class MainWindow
         var scrollPixels = deltaSteps * wheelLines * MouseWheelPixelsPerLine * MouseWheelScrollMultiplier;
         scrollViewer.ScrollToVerticalOffset(scrollViewer.VerticalOffset - scrollPixels);
         e.Handled = true;
+    }
+
+    private void NavigateByPageOffset(int offset)
+    {
+        if (Pages.Count == 0)
+        {
+            return;
+        }
+
+        PrepareForReaderNavigationInput();
+        ScrollPageToTop(Math.Clamp(GetCurrentPageIndex() + offset, 0, Pages.Count - 1));
+    }
+
+    private void PrepareForReaderNavigationInput()
+    {
+        CancelPageNumberInput();
     }
 
     private void UpdatePageWidth(double fallbackWidth = 0)
@@ -365,7 +386,7 @@ public partial class MainWindow
         }
         else if (e.Key == Key.Escape)
         {
-            CancelPageNumberInput();
+            PrepareForReaderNavigationInput();
             e.Handled = true;
         }
     }

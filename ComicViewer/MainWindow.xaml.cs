@@ -141,7 +141,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var offset = e.Key switch
+        var offset = GetNavigationKey(e) switch
         {
             Key.PageUp => -1,
             Key.PageDown => 1,
@@ -153,8 +153,18 @@ public partial class MainWindow : Window
             return;
         }
 
-        ScrollPageToTop(Math.Clamp(GetCurrentPageIndex() + offset, 0, Pages.Count - 1));
+        NavigateByPageOffset(offset);
         e.Handled = true;
+    }
+
+    private static Key GetNavigationKey(KeyEventArgs e)
+    {
+        return e.Key switch
+        {
+            Key.System => e.SystemKey,
+            Key.ImeProcessed => e.ImeProcessedKey,
+            _ => e.Key
+        };
     }
 
     private async Task LoadArchiveWithPasswordRetryAsync(string archivePath, string? initialPassword = null)
