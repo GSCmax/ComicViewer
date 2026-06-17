@@ -2,14 +2,11 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
-using System.Windows.Media.Imaging;
 
 namespace ComicViewer;
 
 public partial class MainWindow
 {
-    private const double VideoCoverCaptureWidth = 480d;
-
     private async void PlayVideoButton_Click(object sender, RoutedEventArgs e)
     {
         if (_isLoadingArchive || sender is not Button { CommandParameter: ComicPage page } button || !page.IsVideo)
@@ -347,10 +344,10 @@ public partial class MainWindow
                 }
 
                 page.SetCoverLoadStatus(VideoCoverLoadStatus.Loading);
-                VideoCoverFrame? coverFrame;
+                VideoThumbnailImage? coverImage;
                 try
                 {
-                    coverFrame = await RenderVideoCoverFrameAsync(page, videoData.Value, coverCts, archivePath);
+                    coverImage = await GenerateVideoCoverImageAsync(videoData.Value, coverCts, archivePath);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
@@ -358,7 +355,7 @@ public partial class MainWindow
                 }
                 catch
                 {
-                    coverFrame = null;
+                    coverImage = null;
                 }
 
                 cancellationToken.ThrowIfCancellationRequested();
@@ -367,14 +364,13 @@ public partial class MainWindow
                     return;
                 }
 
-                if (coverFrame is null)
+                if (coverImage is null)
                 {
                     page.SetCoverLoadStatus(VideoCoverLoadStatus.Failed);
                 }
                 else
                 {
-                    var coverImageData = await Task.Run(() => EncodeBitmapAsPng(coverFrame.Frame), cancellationToken);
-                    StoreVideoCoverFrame(page, new VideoCoverImage(coverImageData, coverFrame.VideoWidth, coverFrame.VideoHeight, coverFrame.Frame.PixelWidth, coverFrame.Frame.PixelHeight));
+                    StoreVideoCoverFrame(page, coverImage);
                 }
 
                 UpdateReadingStatus(GetCurrentPageIndex());
@@ -427,81 +423,19 @@ public partial class MainWindow
         }
     }
 
-    private async Task<VideoCoverFrame?> RenderVideoCoverFrameAsync(
-        ComicPage page,
+    private async Task<VideoThumbnailImage?> GenerateVideoCoverImageAsync(
         ArraySegment<byte> videoData,
         CancellationTokenSource coverCts,
         string archivePath)
     {
         var player = _sharedVideoPlayer ?? throw new InvalidOperationException("共享播放器尚未初始化。");
-        var cancellationToken = coverCts.Token;
-        var firstFrame = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        long videoWidth = 0;
-        long videoHeight = 0;
-
-        void OnFirstFrameRendered() => firstFrame.TrySetResult();
-        void OnVideoSizeChanged(long width, long height)
-        {
-            videoWidth = width;
-            videoHeight = height;
-        }
-
-        try
-        {
-            StopSharedVideoPlayer();
-            VideoCoverGeneratorHost.Content = player;
-            VideoCoverGeneratorHost.UpdateLayout();
-            player.SetSource(videoData);
-            await player.WaitForHostReadyAsync(TimeSpan.FromSeconds(2), cancellationToken);
-            cancellationToken.ThrowIfCancellationRequested();
-            if (!IsVideoCoverRequestCurrent(coverCts, archivePath))
-            {
-                return null;
-            }
-
-            player.FirstFrameRendered += OnFirstFrameRendered;
-            player.VideoSizeChanged += OnVideoSizeChanged;
-            player.PrepareFirstFrame();
-            await firstFrame.Task.WaitAsync(TimeSpan.FromSeconds(2), cancellationToken);
-            cancellationToken.ThrowIfCancellationRequested();
-            await ResizeVideoCoverGeneratorHostAsync(videoWidth, videoHeight, cancellationToken);
-            var frame = IsVideoCoverRequestCurrent(coverCts, archivePath)
-                ? player.CaptureCurrentFrame()
-                : null;
-            return frame is null
-                ? null
-                : new VideoCoverFrame(frame, videoWidth, videoHeight);
-        }
-        finally
-        {
-            player.FirstFrameRendered -= OnFirstFrameRendered;
-            player.VideoSizeChanged -= OnVideoSizeChanged;
-            if (ReferenceEquals(_videoCoverCts, coverCts))
-            {
-                player.Stop();
-            }
-        }
-    }
-
-    private async Task ResizeVideoCoverGeneratorHostAsync(long videoWidth, long videoHeight, CancellationToken cancellationToken)
-    {
-        if (videoWidth <= 0 || videoHeight <= 0)
-        {
-            return;
-        }
-
-        var captureHeight = Math.Max(1d, Math.Round(VideoCoverCaptureWidth * videoHeight / videoWidth));
-        if (Math.Abs(VideoCoverGeneratorHost.Width - VideoCoverCaptureWidth) > 0.1
-            || Math.Abs(VideoCoverGeneratorHost.Height - captureHeight) > 0.1)
-        {
-            VideoCoverGeneratorHost.Width = VideoCoverCaptureWidth;
-            VideoCoverGeneratorHost.Height = captureHeight;
-            VideoCoverGeneratorHost.UpdateLayout();
-        }
-
-        _sharedVideoPlayer?.RequestRender();
-        await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.Render);
-        await Task.Delay(30, cancellationToken);
+        StopSharedVideoPlayer();
+        return await VideoThumbnailService.GenerateAsync(
+            player,
+            VideoCoverGeneratorHost,
+            videoData,
+            () => IsVideoCoverRequestCurrent(coverCts, archivePath),
+            coverCts.Token);
     }
 
     private bool IsVideoCoverRequestCurrent(CancellationTokenSource coverCts, string archivePath)
@@ -513,7 +447,7 @@ public partial class MainWindow
             && string.Equals(_archivePath, archivePath, StringComparison.Ordinal);
     }
 
-    private void StoreVideoCoverFrame(ComicPage page, VideoCoverImage coverImage)
+    private void StoreVideoCoverFrame(ComicPage page, VideoThumbnailImage coverImage)
     {
         page.SetEncodedImageData(coverImage.ImageData);
         if (coverImage.VideoWidth > 0)
@@ -545,19 +479,6 @@ public partial class MainWindow
             }
         }
     }
-
-    private static ArraySegment<byte> EncodeBitmapAsPng(BitmapSource bitmap)
-    {
-        var encoder = new PngBitmapEncoder();
-        encoder.Frames.Add(BitmapFrame.Create(bitmap));
-        using var stream = new MemoryStream();
-        encoder.Save(stream);
-        return new ArraySegment<byte>(stream.ToArray());
-    }
-
-    private sealed record VideoCoverFrame(BitmapSource Frame, long VideoWidth, long VideoHeight);
-
-    private sealed record VideoCoverImage(ArraySegment<byte> ImageData, long VideoWidth, long VideoHeight, int PixelWidth, int PixelHeight);
 
     private ArraySegment<byte>? TryGetCachedVideoData(string entryKey)
     {
