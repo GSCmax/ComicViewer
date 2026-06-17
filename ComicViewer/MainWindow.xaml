@@ -144,7 +144,7 @@
         </Style>
 
         <Style x:Key="PageNumberTextBoxStyle" TargetType="{x:Type TextBox}">
-            <Setter Property="Height" Value="28" />
+            <Setter Property="Height" Value="22" />
             <Setter Property="Padding" Value="2,0" />
             <Setter Property="VerticalContentAlignment" Value="Center" />
             <Setter Property="HorizontalContentAlignment" Value="Center" />
@@ -535,29 +535,48 @@
                         Margin="8,0,6,0"
                         VerticalAlignment="Center"
                         Orientation="Horizontal">
-                <TextBox x:Name="CurrentPageTextBox"
-                         Width="52"
-                         shell:WindowChrome.IsHitTestVisibleInChrome="True"
-                         Style="{StaticResource PageNumberTextBoxStyle}"
-                         IsEnabled="False"
-                         Text=""
-                         GotKeyboardFocus="CurrentPageTextBox_GotKeyboardFocus"
-                         KeyDown="CurrentPageTextBox_KeyDown"
-                         LostKeyboardFocus="CurrentPageTextBox_LostKeyboardFocus"
-                         PreviewTextInput="CurrentPageTextBox_PreviewTextInput" />
-                <TextBlock x:Name="TotalPagesTextBlock"
-                           MinWidth="52"
-                           Margin="6,0,12,0"
-                           VerticalAlignment="Center"
-                           Foreground="{DynamicResource TextMutedBrush}"
-                           Text="/ 0" />
-                <TextBlock x:Name="LoadedRangeTextBlock"
-                           MinWidth="76"
-                           VerticalAlignment="Center"
-                           TextAlignment="Right"
-                           TextTrimming="CharacterEllipsis"
-                           Foreground="{DynamicResource TextMutedBrush}"
-                           Text="0" />
+                <Border Height="28"
+                        MinWidth="40"
+                        Padding="2,0"
+                        Background="{StaticResource SurfaceRaisedBrush}"
+                        BorderBrush="{StaticResource BorderBrush}"
+                        BorderThickness="1"
+                        CornerRadius="5"
+                        SnapsToDevicePixels="True">
+                    <StackPanel VerticalAlignment="Center"
+                                Orientation="Horizontal">
+                        <TextBox x:Name="CurrentPageTextBox"
+                                 shell:WindowChrome.IsHitTestVisibleInChrome="True"
+                                 Style="{StaticResource PageNumberTextBoxStyle}"
+                                 IsEnabled="False"
+                                 Text="0"
+                                 GotKeyboardFocus="CurrentPageTextBox_GotKeyboardFocus"
+                                 KeyDown="CurrentPageTextBox_KeyDown"
+                                 LostKeyboardFocus="CurrentPageTextBox_LostKeyboardFocus"
+                                 PreviewTextInput="CurrentPageTextBox_PreviewTextInput" />
+                        <TextBlock x:Name="TotalPagesTextBlock"
+                                   Margin="6,0,2,0"
+                                   VerticalAlignment="Center"
+                                   Foreground="{DynamicResource TextMutedBrush}"
+                                   Text="/ 0" />
+                    </StackPanel>
+                </Border>
+                <Border Height="28"
+                        MinWidth="40"
+                        Margin="6,0,0,0"
+                        Padding="8,0"
+                        Background="{StaticResource SurfaceRaisedBrush}"
+                        BorderBrush="{StaticResource BorderBrush}"
+                        BorderThickness="1"
+                        CornerRadius="5"
+                        SnapsToDevicePixels="True">
+                    <TextBlock x:Name="LoadedRangeTextBlock"
+                               VerticalAlignment="Center"
+                               TextAlignment="Center"
+                               TextTrimming="CharacterEllipsis"
+                               Foreground="{DynamicResource TextMutedBrush}"
+                               Text="未载入" />
+                </Border>
             </StackPanel>
             <TextBlock x:Name="StatusTextBlock"
                        Margin="0,0,6,0"
