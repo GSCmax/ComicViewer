@@ -71,8 +71,8 @@ public partial class MainWindow
             return;
         }
 
-        using var cachedPlaybackProbe = TryCreateCachedVideoStream(page.EntryKey);
-        if (page.EntrySize > MaxInMemoryVideoPlaybackBytes && cachedPlaybackProbe is null)
+        var cachedVideoData = TryGetCachedVideoData(page.EntryKey);
+        if (page.EntrySize > MaxInMemoryVideoPlaybackBytes && !cachedVideoData.HasValue)
         {
             StatusTextBlock.Text = $"视频过大，已阻止整段读入内存: {Path.GetFileName(page.EntryKey)}";
             MessageBox.Show(
@@ -88,20 +88,33 @@ public partial class MainWindow
         var playCts = BeginVideoPlayLoad();
         var cancellationToken = playCts.Token;
         MemoryStream? videoStream = null;
+        ArraySegment<byte> videoData;
 
         try
         {
             StatusTextBlock.Text = $"正在准备播放 {Path.GetFileName(page.EntryKey)} ...";
 
-            videoStream = TryCreateCachedVideoStream(page.EntryKey)
-                ?? await Task.Run(() => _archiveSession?.CopyEntryToMemory(page.EntryKey, cancellationToken, MaxInMemoryVideoPlaybackBytes), cancellationToken);
+            if (cachedVideoData.HasValue)
+            {
+                videoData = cachedVideoData.Value;
+            }
+            else
+            {
+                videoStream = await Task.Run(() => _archiveSession?.CopyEntryToMemory(page.EntryKey, cancellationToken, MaxInMemoryVideoPlaybackBytes), cancellationToken);
+                if (videoStream is null)
+                {
+                    return;
+                }
+
+                videoData = TakeMemorySegment(videoStream);
+            }
+
             cancellationToken.ThrowIfCancellationRequested();
-            if (videoStream is null || !IsVideoPlayRequestCurrent(playCts, archivePath, page))
+            if (!IsVideoPlayRequestCurrent(playCts, archivePath, page))
             {
                 return;
             }
 
-            var videoData = TakeMemorySegment(videoStream);
             await PrepareSharedVideoPlayerAsync(page, videoData, playCts, archivePath);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -120,19 +133,6 @@ public partial class MainWindow
         }
     }
 
-    private MemoryStream? TryCreateCachedVideoStream(string entryKey)
-    {
-        lock (_cacheLock)
-        {
-            if (_mediaCache.TryGetValue(entryKey, out var cachedMedia) && cachedMedia.VideoData is { } videoData)
-            {
-                return CreateReadOnlyMemoryStream(videoData);
-            }
-        }
-
-        return null;
-    }
-
     private static ArraySegment<byte> TakeMemorySegment(MemoryStream stream)
     {
         if (stream.TryGetBuffer(out var buffer)
@@ -144,13 +144,6 @@ public partial class MainWindow
         }
 
         return new ArraySegment<byte>(stream.ToArray());
-    }
-
-    private static MemoryStream CreateReadOnlyMemoryStream(ArraySegment<byte> data)
-    {
-        return data.Array is null
-            ? new MemoryStream(Array.Empty<byte>(), writable: false)
-            : new MemoryStream(data.Array, data.Offset, data.Count, writable: false);
     }
 
     private static MpvVideoPlayerControl CreateVideoPlayer()

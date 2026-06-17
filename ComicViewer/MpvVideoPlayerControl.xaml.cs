@@ -1,5 +1,6 @@
 using OpenTK.Graphics.OpenGL4;
 using OpenTK.Wpf;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -63,8 +64,13 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
             throw new ArgumentException("Video data must reference a byte array.", nameof(source));
         }
 
-        Stop();
         _source = source;
+        if (_engine is not null)
+        {
+            _engine.Stop();
+            _engine.SetSource(source);
+            ResetPlaybackState();
+        }
     }
 
     public void SetSource(byte[] source)
@@ -87,6 +93,7 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
         IsPlaying = false;
         IsPaused = false;
         HasRenderedFirstFrame = false;
+        VideoView.ResetFrameState();
     }
 
     public void PrepareFirstFrame()
@@ -169,18 +176,14 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
             return;
         }
 
-        var engine = _engine;
-        _engine = null;
-        DetachEngineEvents(engine);
         try
         {
-            engine.Stop();
+            _engine.Stop();
         }
         catch
         {
         }
 
-        engine.Dispose();
         ResetPlaybackState();
     }
 
@@ -192,7 +195,7 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
         }
 
         _isDisposed = true;
-        Stop();
+        DisposeEngine();
         if (VideoView.Dispatcher.CheckAccess())
         {
             VideoView.Dispose();
@@ -220,6 +223,29 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
             control.Stop();
             control._source = null;
         }
+    }
+
+    private void DisposeEngine()
+    {
+        var engine = _engine;
+        if (engine is null)
+        {
+            ResetPlaybackState();
+            return;
+        }
+
+        _engine = null;
+        DetachEngineEvents(engine);
+        try
+        {
+            engine.Stop();
+        }
+        catch
+        {
+        }
+
+        engine.Dispose();
+        ResetPlaybackState();
     }
 
     private MpvVideoPlaybackEngine EnsureEngine()
@@ -367,10 +393,11 @@ internal sealed class MpvVideoPlaybackEngine : IDisposable
 {
     private const string StreamUri = "comic://media";
 
-    private readonly ArraySegment<byte> _videoData;
     private readonly object _mpvLock = new();
+    private readonly object _sourceLock = new();
     private readonly MpvOpenGlVideoView _view;
     private readonly GCHandle _streamUserDataHandle;
+    private ArraySegment<byte> _videoData;
     private IntPtr _mpv;
     private Task? _eventLoopTask;
     private long _displayWidth;
@@ -380,7 +407,16 @@ internal sealed class MpvVideoPlaybackEngine : IDisposable
     private bool _isInitialized;
     private bool _isDisposed;
 
-    private ArraySegment<byte> VideoData => _videoData;
+    private ArraySegment<byte> VideoData
+    {
+        get
+        {
+            lock (_sourceLock)
+            {
+                return _videoData;
+            }
+        }
+    }
 
     public MpvVideoPlaybackEngine(ArraySegment<byte> videoData, MpvOpenGlVideoView view)
     {
@@ -406,12 +442,32 @@ internal sealed class MpvVideoPlaybackEngine : IDisposable
     public event Action? EndReached;
     public event Action? PlaybackError;
 
+    public void SetSource(ArraySegment<byte> videoData)
+    {
+        if (videoData.Array is null)
+        {
+            throw new ArgumentException("Video data must reference a byte array.", nameof(videoData));
+        }
+
+        lock (_sourceLock)
+        {
+            _videoData = videoData;
+        }
+
+        _displayWidth = 0;
+        _displayHeight = 0;
+        _hasShownVideoSurface = false;
+    }
+
     public void Load(bool autoPlayAfterFirstFrame)
     {
         lock (_mpvLock)
         {
             ThrowIfDisposed();
             _autoPlayAfterFirstFrame = autoPlayAfterFirstFrame;
+            _hasShownVideoSurface = false;
+            _displayWidth = 0;
+            _displayHeight = 0;
             EnsureInitialized();
             MpvNative.Check(MpvNative.CommandString(_mpv, "set pause yes"), "mpv 无法准备首帧。");
             MpvNative.Check(MpvNative.CommandString(_mpv, $"loadfile {StreamUri} replace"), "mpv 无法载入内存视频流。");
@@ -484,6 +540,9 @@ internal sealed class MpvVideoPlaybackEngine : IDisposable
         MpvNative.Check(MpvNative.SetOptionString(_mpv, "vo", "libmpv"), "mpv 选项设置失败。");
         _ = MpvNative.SetOptionString(_mpv, "hwdec", "auto-safe");
         _ = MpvNative.SetOptionString(_mpv, "video-timing-offset", "0");
+        _ = MpvNative.SetOptionString(_mpv, "cache", "no");
+        _ = MpvNative.SetOptionString(_mpv, "demuxer-max-bytes", (32L * 1024 * 1024).ToString(CultureInfo.InvariantCulture));
+        _ = MpvNative.SetOptionString(_mpv, "demuxer-max-back-bytes", (8L * 1024 * 1024).ToString(CultureInfo.InvariantCulture));
         MpvNative.Check(MpvNative.Initialize(_mpv), "mpv 初始化失败。");
         MpvNative.Check(MpvNative.StreamCbAddRo(_mpv, "comic", GCHandle.ToIntPtr(_streamUserDataHandle), MpvNative.OpenStreamCallback), "mpv 内存流注册失败。");
         MpvNative.Check(_view.InitializeRenderer(_mpv), "mpv OpenGL 渲染器初始化失败。");
@@ -641,7 +700,7 @@ internal sealed class MpvVideoPlaybackEngine : IDisposable
         {
             PlaybackError?.Invoke();
         }
-        else
+        else if (endFile.Reason == MpvEndFileReason.Eof)
         {
             EndReached?.Invoke();
         }
@@ -945,6 +1004,18 @@ public sealed class MpvOpenGlVideoView : GLWpfControl
         Interlocked.Exchange(ref _renderRequestPending, 1);
     }
 
+    public void ResetFrameState()
+    {
+        if (Dispatcher.CheckAccess())
+        {
+            ResetFrameStateCore();
+        }
+        else
+        {
+            Dispatcher.Invoke(ResetFrameStateCore);
+        }
+    }
+
     public new void Dispose()
     {
         if (_isDisposed)
@@ -1079,6 +1150,13 @@ public sealed class MpvOpenGlVideoView : GLWpfControl
     private void OnMpvRenderUpdate(IntPtr callbackContext)
     {
         RequestRender();
+    }
+
+    private void ResetFrameStateCore()
+    {
+        _hasRenderedFrame = false;
+        _forceRender = true;
+        Interlocked.Exchange(ref _renderRequestPending, 1);
     }
 
     private void OnRender(TimeSpan delta)

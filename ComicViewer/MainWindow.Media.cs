@@ -520,6 +520,13 @@ public partial class MainWindow
         }
     }
 
+    private static MemoryStream CreateReadOnlyMemoryStream(ArraySegment<byte> data)
+    {
+        return data.Array is null
+            ? new MemoryStream(Array.Empty<byte>(), writable: false)
+            : new MemoryStream(data.Array, data.Offset, data.Count, writable: false);
+    }
+
     private void DecodeVisibleImages()
     {
         var decodePixelWidth = GetDecodePixelWidth();
