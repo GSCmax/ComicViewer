@@ -34,6 +34,7 @@ public partial class MainWindow : Window
     private ScrollViewer? _pagesScrollViewer;
     private MpvVideoPlayerControl? _sharedVideoPlayer;
     private ComicPage? _sharedVideoPage;
+    private VideoThumbnailService? _videoThumbnailService;
     private HashSet<int> _realizedPageIndexesSnapshot = [];
     private HashSet<int> _visiblePageIndexesSnapshot = [];
     private string? _archivePath;
@@ -61,6 +62,7 @@ public partial class MainWindow : Window
         DataContext = this;
         _sharedVideoPlayer = CreateVideoPlayer();
         VideoCoverGeneratorHost.Content = _sharedVideoPlayer;
+        _videoThumbnailService = new VideoThumbnailService(new HeadlessMpvVideoThumbnailProvider());
         AttachPlaybackEvents(_sharedVideoPlayer);
         LoadPasswordHistory();
 

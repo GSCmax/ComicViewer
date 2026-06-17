@@ -428,11 +428,8 @@ public partial class MainWindow
         CancellationTokenSource coverCts,
         string archivePath)
     {
-        var player = _sharedVideoPlayer ?? throw new InvalidOperationException("共享播放器尚未初始化。");
-        StopSharedVideoPlayer();
-        return await VideoThumbnailService.GenerateAsync(
-            player,
-            VideoCoverGeneratorHost,
+        var thumbnailService = _videoThumbnailService ?? throw new InvalidOperationException("视频封面服务尚未初始化。");
+        return await thumbnailService.GenerateAsync(
             videoData,
             () => IsVideoCoverRequestCurrent(coverCts, archivePath),
             coverCts.Token);
@@ -511,6 +508,7 @@ public partial class MainWindow
         _sharedVideoPlayer?.Dispose();
         VideoCoverGeneratorHost.Content = null;
         _sharedVideoPlayer = null;
+        _videoThumbnailService = null;
     }
 
     private void StopAllVideos()
