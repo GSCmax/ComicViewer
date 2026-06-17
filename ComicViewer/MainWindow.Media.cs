@@ -464,7 +464,6 @@ public partial class MainWindow
     {
         ReleaseDecodedImagesOutsideRange();
         ScheduleDecodeVisibleImages();
-        ScheduleVideoCoverGeneration();
     }
 
     private void ScheduleDecodeVisibleImages()
