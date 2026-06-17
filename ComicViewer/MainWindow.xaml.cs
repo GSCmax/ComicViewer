@@ -31,6 +31,7 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _imageDecodeDebounceCts;
     private Task? _mediaLoadTask;
     private TaskCompletionSource<string?>? _passwordPrompt;
+    private IInputElement? _pageNumberPreviousFocus;
     private ScrollViewer? _pagesScrollViewer;
     private MpvVideoPlayerControl? _sharedVideoPlayer;
     private ComicPage? _sharedVideoPage;

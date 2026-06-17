@@ -374,6 +374,11 @@ public partial class MainWindow
 
     private void CurrentPageTextBox_GotKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
     {
+        if (e.OldFocus is { } oldFocus && !ReferenceEquals(oldFocus, CurrentPageTextBox))
+        {
+            _pageNumberPreviousFocus = oldFocus;
+        }
+
         CurrentPageTextBox.SelectAll();
     }
 
@@ -445,6 +450,25 @@ public partial class MainWindow
         }
 
         Keyboard.ClearFocus();
+        RestorePageNumberPreviousFocus();
+    }
+
+    private void RestorePageNumberPreviousFocus()
+    {
+        var previousFocus = _pageNumberPreviousFocus;
+        _pageNumberPreviousFocus = null;
+        if (previousFocus is null || ReferenceEquals(previousFocus, CurrentPageTextBox))
+        {
+            return;
+        }
+
+        try
+        {
+            _ = Keyboard.Focus(previousFocus);
+        }
+        catch (InvalidOperationException)
+        {
+        }
     }
 
     private static string FormatByteSize(long bytes)
