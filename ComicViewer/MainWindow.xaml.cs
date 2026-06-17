@@ -13,7 +13,7 @@ public partial class MainWindow : Window
     private const int MediaLoadParallelism = 2;
     private const long MaxMediaCacheBytes = 512L * 1024 * 1024;
     private const long MaxInMemoryVideoPlaybackBytes = MaxMediaCacheBytes;
-    private const int ImageDecodeDebounceMilliseconds = 150;
+    private const int ImageDecodeDebounceMilliseconds = 50;
     private const double MouseWheelScrollMultiplier = 5d;
     private const double MouseWheelPixelsPerLine = 16d;
 
