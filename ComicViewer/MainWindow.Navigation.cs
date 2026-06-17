@@ -33,6 +33,7 @@ public partial class MainWindow
 
     private void ImageScrollViewer_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
     {
+        CancelPageNumberInput();
         var scrollViewer = GetPagesScrollViewer();
         if (scrollViewer is null)
         {
@@ -364,22 +365,19 @@ public partial class MainWindow
         }
         else if (e.Key == Key.Escape)
         {
-            if (Pages.Count > 0)
-            {
-                UpdateReadingStatus(Math.Clamp(_currentPageIndex, 0, Pages.Count - 1));
-            }
-            else
-            {
-                ClearReadingProgress();
-            }
-
-            Keyboard.ClearFocus();
+            CancelPageNumberInput();
             e.Handled = true;
         }
     }
 
     private void CurrentPageTextBox_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
     {
+        if (_isCancelingPageNumberInput)
+        {
+            _isCancelingPageNumberInput = false;
+            return;
+        }
+
         CommitPageNumberInput();
     }
 
@@ -406,6 +404,26 @@ public partial class MainWindow
         {
             UpdateReadingStatus(Math.Clamp(_currentPageIndex, 0, Pages.Count - 1));
         }
+    }
+
+    private void CancelPageNumberInput()
+    {
+        if (!CurrentPageTextBox.IsKeyboardFocusWithin)
+        {
+            return;
+        }
+
+        _isCancelingPageNumberInput = true;
+        if (Pages.Count > 0)
+        {
+            CurrentPageTextBox.Text = (Math.Clamp(_currentPageIndex, 0, Pages.Count - 1) + 1).ToString(CultureInfo.InvariantCulture);
+        }
+        else
+        {
+            CurrentPageTextBox.Text = "";
+        }
+
+        Keyboard.ClearFocus();
     }
 
     private static string FormatByteSize(long bytes)

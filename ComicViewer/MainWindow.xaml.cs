@@ -47,6 +47,7 @@ public partial class MainWindow : Window
     private DateTime _lastCacheTrimUtc = DateTime.MinValue;
     private DateTime _lastScrollUtc = DateTime.MinValue;
     private bool _isLoadingArchive;
+    private bool _isCancelingPageNumberInput;
     private bool _viewportSnapshotDirty = true;
 
     public ObservableCollection<ComicPage> Pages { get; } = [];
