@@ -1,6 +1,5 @@
 using System.IO;
 using System.Runtime;
-using System.Windows.Media;
 using System.Windows.Media.Imaging;
 
 namespace ComicViewer;
@@ -121,9 +120,8 @@ public partial class MainWindow
 
             using var encodedMedia = session.CopyEntryToMemory(requestedPage.EntryKey, cancellationToken, MaxMediaCacheBytes);
             var videoData = TakeMemorySegment(encodedMedia);
-            var coverFrame = await TryRenderVideoCoverFrameAsync(videoData, cancellationToken);
             await Dispatcher.InvokeAsync(
-                () => AcceptVideo(request, videoData, coverFrame, generation),
+                () => AcceptVideo(request, videoData, generation),
                 System.Windows.Threading.DispatcherPriority.Background);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -222,7 +220,7 @@ public partial class MainWindow
         UpdateReadingStatus(GetCurrentPageIndex());
     }
 
-    private void AcceptVideo(MediaLoadRequest request, ArraySegment<byte> videoData, ImageSource? coverFrame, int generation)
+    private void AcceptVideo(MediaLoadRequest request, ArraySegment<byte> videoData, int generation)
     {
         if (!IsFreshRequest(request, generation))
         {
@@ -231,17 +229,9 @@ public partial class MainWindow
         }
 
         var page = Pages[request.PageIndex];
-        StoreCachedMedia(new CachedMedia(page.EntryKey, request.PageIndex, page.MediaType, null, videoData, coverFrame, videoData.Count), request);
-        if (coverFrame is not null && !page.IsVideoPlaying)
-        {
-            page.SetVideoFrame(coverFrame);
-            if (coverFrame.Width > 0)
-            {
-                page.SetAspectRatio(coverFrame.Height / coverFrame.Width, _pageWidth);
-            }
-        }
-
-        page.SetCoverLoadStatus(coverFrame is null ? VideoCoverLoadStatus.Failed : VideoCoverLoadStatus.Success);
+        StoreCachedMedia(new CachedMedia(page.EntryKey, request.PageIndex, page.MediaType, null, videoData, null, videoData.Count), request);
+        page.SetCoverLoadStatus(VideoCoverLoadStatus.Loading);
+        ScheduleVideoCoverGeneration();
         EvictMediaOverBudget();
         UpdateReadingStatus(GetCurrentPageIndex());
     }
@@ -363,10 +353,6 @@ public partial class MainWindow
         {
             page.ClearEncodedImageData();
         }
-        else if (media.Type == ComicMediaType.Video && !page.IsVideoPlaying && ReferenceEquals(page.VideoFrame, media.VideoFrame))
-        {
-            page.ClearVideoFrame();
-        }
     }
 
     private void ApplyCachedMedia(ComicPage page, CachedMedia cachedMedia)
@@ -375,9 +361,14 @@ public partial class MainWindow
         {
             page.SetEncodedImageData(imageData);
         }
-        else if (cachedMedia.Type == ComicMediaType.Video && cachedMedia.VideoFrame is not null && page.VideoFrame is null)
+        else if (cachedMedia.Type == ComicMediaType.Video && cachedMedia.VideoFrame is not null)
         {
             page.SetVideoFrame(cachedMedia.VideoFrame);
+        }
+        else if (cachedMedia.Type == ComicMediaType.Video && cachedMedia.VideoData is not null)
+        {
+            page.SetCoverLoadStatus(VideoCoverLoadStatus.Loading);
+            ScheduleVideoCoverGeneration();
         }
     }
 
@@ -416,10 +407,7 @@ public partial class MainWindow
         foreach (var page in Pages)
         {
             page.ClearEncodedImageData();
-            if (!page.IsVideoPlaying)
-            {
-                page.ClearVideoFrame();
-            }
+            page.ClearVideoFrame();
         }
     }
 
@@ -476,6 +464,7 @@ public partial class MainWindow
     {
         ReleaseDecodedImagesOutsideRange();
         ScheduleDecodeVisibleImages();
+        ScheduleVideoCoverGeneration();
     }
 
     private void ScheduleDecodeVisibleImages()

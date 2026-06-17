@@ -23,9 +23,10 @@ public partial class MainWindow
                 return;
             }
 
-            if (page.VideoPlayer is not null && page.IsVideoPaused)
+            if (ReferenceEquals(_sharedVideoPage, page) && page.IsVideoPaused)
             {
-                page.ResumeVideo();
+                _sharedVideoPlayer?.Resume();
+                page.NotifyPlaybackStateChanged();
             }
             else
             {
@@ -81,16 +82,13 @@ public partial class MainWindow
             return;
         }
 
+        CancelVideoCoverGeneration();
         var playCts = BeginVideoPlayLoad();
         var cancellationToken = playCts.Token;
         MemoryStream? videoStream = null;
-        MpvVideoPlayerControl? player = null;
-        var assignedToPage = false;
 
         try
         {
-            StopOtherVideos(page);
-            page.StopVideo();
             StatusTextBlock.Text = $"正在准备播放 {Path.GetFileName(page.EntryKey)} ...";
 
             videoStream = TryCreateCachedVideoStream(page.EntryKey)
@@ -102,36 +100,19 @@ public partial class MainWindow
             }
 
             var videoData = TakeMemorySegment(videoStream);
-            player = CreateVideoPlayer(videoData);
-            page.SetVideoPlayer(player);
-            assignedToPage = true;
-            AttachPlaybackEvents(page, player);
-            player.BeginPreparing();
-            page.NotifyPlaybackStateChanged();
-            ReleaseMouseInputCapture();
-
-            await Dispatcher.InvokeAsync(() => PagesListBox.UpdateLayout());
-            await player.WaitForHostReadyAsync(TimeSpan.FromSeconds(2), cancellationToken);
-            player.Play();
-
-            StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - 使用内存播放";
+            await PrepareSharedVideoPlayerAsync(page, videoData, playCts, archivePath);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
         catch (Exception ex)
         {
-            page.StopVideo();
+            StopSharedVideoPlayer();
             StatusTextBlock.Text = "视频播放失败";
             MessageBox.Show(this, ex.Message, "无法播放视频", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
-            if (!assignedToPage)
-            {
-                player?.Dispose();
-            }
-
             videoStream?.Dispose();
             FinishVideoPlayLoad(playCts);
         }
@@ -170,33 +151,47 @@ public partial class MainWindow
             : new MemoryStream(data.Array, data.Offset, data.Count, writable: false);
     }
 
-    private static async Task<ImageSource?> TryRenderVideoCoverFrameAsync(
-        ArraySegment<byte> videoData,
-        CancellationToken cancellationToken)
+    private static MpvVideoPlayerControl CreateVideoPlayer()
     {
-        var framePng = await MpvVideoPlayerControl.TryRenderFirstFramePngAsync(
-            videoData,
-            TimeSpan.FromSeconds(2),
-            cancellationToken);
-        if (framePng is not { } pngData)
+        return new MpvVideoPlayerControl();
+    }
+
+    private async Task PrepareSharedVideoPlayerAsync(
+        ComicPage page,
+        ArraySegment<byte> videoData,
+        CancellationTokenSource playCts,
+        string archivePath)
+    {
+        var player = _sharedVideoPlayer ?? throw new InvalidOperationException("共享播放器尚未初始化。");
+        var cancellationToken = playCts.Token;
+
+        StopSharedVideoPlayer(returnToCoverHost: false);
+        VideoCoverGeneratorHost.Content = null;
+        player.SetSource(videoData);
+        _sharedVideoPage = page;
+        page.SetVideoPlayer(player);
+        player.BeginPreparing(autoPlayAfterFirstFrame: true);
+        page.NotifyPlaybackStateChanged();
+        ReleaseMouseInputCapture();
+
+        await Dispatcher.InvokeAsync(() => PagesListBox.UpdateLayout());
+        await player.WaitForHostReadyAsync(TimeSpan.FromSeconds(2), cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!IsVideoPlayRequestCurrent(playCts, archivePath, page))
         {
-            return null;
+            return;
         }
 
-        using var stream = CreateReadOnlyMemoryStream(pngData);
-        return DecodeImage(stream, MinimumDecodePixelWidth);
+        player.Play();
+        StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - 使用内存播放";
     }
 
-    private static MpvVideoPlayerControl CreateVideoPlayer(ArraySegment<byte> videoData)
-    {
-        return new MpvVideoPlayerControl(videoData);
-    }
-
-    private void AttachPlaybackEvents(ComicPage page, MpvVideoPlayerControl player)
+    private void AttachPlaybackEvents(MpvVideoPlayerControl player)
     {
         player.Playing += () => Dispatcher.BeginInvoke((Action)(() =>
         {
-            if (page.VideoPlayer == player)
+            var page = _sharedVideoPage;
+            if (page?.VideoPlayer == player)
             {
                 page.NotifyPlaybackStateChanged();
                 StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - 正在播放";
@@ -205,7 +200,8 @@ public partial class MainWindow
 
         player.Paused += () => Dispatcher.BeginInvoke((Action)(() =>
         {
-            if (page.VideoPlayer == player)
+            var page = _sharedVideoPage;
+            if (page?.VideoPlayer == player)
             {
                 page.NotifyPlaybackStateChanged();
                 StatusTextBlock.Text = $"{Path.GetFileName(page.EntryKey)} - 已暂停";
@@ -214,7 +210,8 @@ public partial class MainWindow
 
         player.DurationChanged += durationMs => Dispatcher.BeginInvoke((Action)(() =>
         {
-            if (page.VideoPlayer == player)
+            var page = _sharedVideoPage;
+            if (page?.VideoPlayer == player)
             {
                 page.SetVideoDuration(durationMs);
             }
@@ -222,7 +219,8 @@ public partial class MainWindow
 
         player.VideoSizeChanged += (width, height) => Dispatcher.BeginInvoke((Action)(() =>
         {
-            if (page.VideoPlayer == player && width > 0)
+            var page = _sharedVideoPage;
+            if (page?.VideoPlayer == player && width > 0)
             {
                 page.SetAspectRatio((double)height / width, _pageWidth);
             }
@@ -230,7 +228,8 @@ public partial class MainWindow
 
         player.FirstFrameRendered += () => Dispatcher.BeginInvoke((Action)(() =>
         {
-            if (page.VideoPlayer == player)
+            var page = _sharedVideoPage;
+            if (page?.VideoPlayer == player)
             {
                 page.NotifyPlaybackStateChanged();
             }
@@ -238,7 +237,8 @@ public partial class MainWindow
 
         player.TimeChanged += positionMs => Dispatcher.BeginInvoke((Action)(() =>
         {
-            if (page.VideoPlayer == player)
+            var page = _sharedVideoPage;
+            if (page?.VideoPlayer == player)
             {
                 page.SetVideoPosition(positionMs);
             }
@@ -246,20 +246,22 @@ public partial class MainWindow
 
         player.EndReached += () => Dispatcher.BeginInvoke((Action)(() =>
         {
-            if (page.VideoPlayer == player)
+            if (_sharedVideoPage?.VideoPlayer == player)
             {
-                page.StopVideo();
+                StopSharedVideoPlayer();
+                ScheduleVideoCoverGeneration();
             }
         }), System.Windows.Threading.DispatcherPriority.Background);
 
         player.PlaybackError += () => Dispatcher.BeginInvoke((Action)(() =>
         {
-            if (page.VideoPlayer != player)
+            if (_sharedVideoPage?.VideoPlayer != player)
             {
                 return;
             }
 
-            page.StopVideo();
+            StopSharedVideoPlayer();
+            ScheduleVideoCoverGeneration();
             StatusTextBlock.Text = "视频播放失败";
             MessageBox.Show(this, "播放器无法播放这个视频。", "视频播放失败", MessageBoxButton.OK, MessageBoxImage.Error);
         }));
@@ -299,22 +301,219 @@ public partial class MainWindow
             && ReferenceEquals(Pages[page.Index], page);
     }
 
-    private void StopAllVideos()
+    private void ScheduleVideoCoverGeneration()
     {
-        foreach (var page in Pages)
+        var archivePath = _archivePath;
+        if (archivePath is null
+            || _videoCoverCts is not null
+            || _videoPlayCts is not null
+            || _sharedVideoPage is not null)
         {
-            page.StopVideo();
+            return;
+        }
+
+        var coverCts = new CancellationTokenSource();
+        _videoCoverCts = coverCts;
+        _ = GenerateVideoCoversAsync(archivePath, coverCts);
+    }
+
+    private void CancelVideoCoverGeneration()
+    {
+        var cts = _videoCoverCts;
+        _videoCoverCts = null;
+        cts?.Cancel();
+    }
+
+    private async Task GenerateVideoCoversAsync(string archivePath, CancellationTokenSource coverCts)
+    {
+        var cancellationToken = coverCts.Token;
+        try
+        {
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!IsVideoCoverRequestCurrent(coverCts, archivePath))
+                {
+                    return;
+                }
+
+                var page = FindNextVideoCoverPage();
+                if (page is null)
+                {
+                    return;
+                }
+
+                var videoData = TryGetCachedVideoData(page.EntryKey);
+                if (!videoData.HasValue)
+                {
+                    return;
+                }
+
+                page.SetCoverLoadStatus(VideoCoverLoadStatus.Loading);
+                ImageSource? frame;
+                try
+                {
+                    frame = await RenderVideoCoverFrameAsync(page, videoData.Value, coverCts, archivePath);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch
+                {
+                    frame = null;
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!IsVideoCoverRequestCurrent(coverCts, archivePath))
+                {
+                    return;
+                }
+
+                if (frame is null)
+                {
+                    page.SetCoverLoadStatus(VideoCoverLoadStatus.Failed);
+                }
+                else
+                {
+                    StoreVideoCoverFrame(page, frame);
+                }
+
+                UpdateReadingStatus(GetCurrentPageIndex());
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        finally
+        {
+            if (ReferenceEquals(_videoCoverCts, coverCts))
+            {
+                _videoCoverCts = null;
+                StopSharedVideoPlayer();
+            }
+
+            coverCts.Dispose();
         }
     }
 
-    private void StopOtherVideos(ComicPage currentPage)
+    private ComicPage? FindNextVideoCoverPage()
     {
-        foreach (var page in Pages)
+        return Pages
+            .Where(page => page.IsVideo
+                && !page.HasVideoFrame
+                && page.CoverLoadStatus != VideoCoverLoadStatus.Failed
+                && page.CoverLoadStatus != VideoCoverLoadStatus.Oversized
+                && TryGetCachedVideoData(page.EntryKey).HasValue)
+            .OrderBy(page => Math.Abs(page.Index - _currentPageIndex))
+            .ThenBy(page => page.Index)
+            .FirstOrDefault();
+    }
+
+    private async Task<ImageSource?> RenderVideoCoverFrameAsync(
+        ComicPage page,
+        ArraySegment<byte> videoData,
+        CancellationTokenSource coverCts,
+        string archivePath)
+    {
+        var player = _sharedVideoPlayer ?? throw new InvalidOperationException("共享播放器尚未初始化。");
+        var cancellationToken = coverCts.Token;
+        var firstFrame = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void OnFirstFrameRendered() => firstFrame.TrySetResult();
+
+        try
         {
-            if (!ReferenceEquals(page, currentPage))
+            StopSharedVideoPlayer();
+            VideoCoverGeneratorHost.Content = player;
+            VideoCoverGeneratorHost.UpdateLayout();
+            player.SetSource(videoData);
+            await player.WaitForHostReadyAsync(TimeSpan.FromSeconds(2), cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!IsVideoCoverRequestCurrent(coverCts, archivePath))
             {
-                page.StopVideo();
+                return null;
+            }
+
+            player.FirstFrameRendered += OnFirstFrameRendered;
+            player.PrepareFirstFrame();
+            await firstFrame.Task.WaitAsync(TimeSpan.FromSeconds(2), cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            return IsVideoCoverRequestCurrent(coverCts, archivePath)
+                ? player.CaptureCurrentFrame()
+                : null;
+        }
+        finally
+        {
+            player.FirstFrameRendered -= OnFirstFrameRendered;
+            if (ReferenceEquals(_videoCoverCts, coverCts))
+            {
+                player.Stop();
             }
         }
+    }
+
+    private bool IsVideoCoverRequestCurrent(CancellationTokenSource coverCts, string archivePath)
+    {
+        return ReferenceEquals(_videoCoverCts, coverCts)
+            && !coverCts.IsCancellationRequested
+            && _videoPlayCts is null
+            && _sharedVideoPage is null
+            && string.Equals(_archivePath, archivePath, StringComparison.Ordinal);
+    }
+
+    private void StoreVideoCoverFrame(ComicPage page, ImageSource frame)
+    {
+        page.SetVideoFrame(frame);
+        if (frame.Width > 0)
+        {
+            page.SetAspectRatio(frame.Height / frame.Width, _pageWidth);
+        }
+
+        lock (_cacheLock)
+        {
+            if (_mediaCache.TryGetValue(page.EntryKey, out var cachedMedia))
+            {
+                _mediaCache[page.EntryKey] = cachedMedia with { VideoFrame = frame };
+            }
+        }
+    }
+
+    private ArraySegment<byte>? TryGetCachedVideoData(string entryKey)
+    {
+        lock (_cacheLock)
+        {
+            if (_mediaCache.TryGetValue(entryKey, out var cachedMedia) && cachedMedia.VideoData is { } videoData)
+            {
+                return videoData;
+            }
+
+            return null;
+        }
+    }
+
+    private void StopSharedVideoPlayer(bool returnToCoverHost = true)
+    {
+        var page = _sharedVideoPage;
+        _sharedVideoPage = null;
+        _sharedVideoPlayer?.Stop();
+        page?.DetachVideoPlayer();
+        if (returnToCoverHost && _sharedVideoPlayer is not null && !ReferenceEquals(VideoCoverGeneratorHost.Content, _sharedVideoPlayer))
+        {
+            VideoCoverGeneratorHost.Content = _sharedVideoPlayer;
+        }
+    }
+
+    private void DisposeSharedVideoPlayer()
+    {
+        StopSharedVideoPlayer();
+        _sharedVideoPlayer?.Dispose();
+        VideoCoverGeneratorHost.Content = null;
+        _sharedVideoPlayer = null;
+    }
+
+    private void StopAllVideos()
+    {
+        StopSharedVideoPlayer();
     }
 }

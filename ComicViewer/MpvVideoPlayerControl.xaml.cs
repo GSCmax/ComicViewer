@@ -1,11 +1,10 @@
 using OpenTK.Graphics.OpenGL4;
 using OpenTK.Wpf;
-using System.Diagnostics;
-using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 
 namespace ComicViewer;
 
@@ -13,6 +12,7 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
 {
     private MpvVideoPlaybackEngine? _engine;
     private ArraySegment<byte>? _source;
+    private bool _autoPlayAfterFirstFrame;
     private bool _isDisposed;
 
     public static readonly DependencyProperty SourceBytesProperty = DependencyProperty.Register(
@@ -55,14 +55,6 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
         set => SetValue(SourceBytesProperty, value);
     }
 
-    public static Task<ArraySegment<byte>?> TryRenderFirstFramePngAsync(
-        ArraySegment<byte> videoData,
-        TimeSpan timeout,
-        CancellationToken cancellationToken)
-    {
-        return MpvVideoPlaybackEngine.TryRenderFirstFramePngAsync(videoData, timeout, cancellationToken);
-    }
-
     public void SetSource(ArraySegment<byte> source)
     {
         ThrowIfDisposed();
@@ -87,13 +79,28 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
         return VideoView.WaitForReadyAsync(timeout, cancellationToken);
     }
 
-    public void BeginPreparing()
+    public void BeginPreparing(bool autoPlayAfterFirstFrame = true)
     {
         ThrowIfDisposed();
+        _autoPlayAfterFirstFrame = autoPlayAfterFirstFrame;
         IsPreparing = true;
         IsPlaying = false;
         IsPaused = false;
         HasRenderedFirstFrame = false;
+    }
+
+    public void PrepareFirstFrame()
+    {
+        ThrowIfDisposed();
+        var engine = EnsureEngine();
+        BeginPreparing(autoPlayAfterFirstFrame: false);
+        engine.Load(autoPlayAfterFirstFrame: false);
+    }
+
+    public BitmapSource? CaptureCurrentFrame()
+    {
+        ThrowIfDisposed();
+        return VideoView.CaptureCurrentFrame();
     }
 
     public async Task PlayAsync(CancellationToken cancellationToken = default)
@@ -118,8 +125,8 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
     {
         ThrowIfDisposed();
         var engine = EnsureEngine();
-        BeginPreparing();
-        engine.Play();
+        BeginPreparing(autoPlayAfterFirstFrame: true);
+        engine.Load(autoPlayAfterFirstFrame: true);
     }
 
     public void Pause()
@@ -129,6 +136,8 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
             return;
         }
 
+        IsPreparing = false;
+        IsPlaying = false;
         IsPaused = true;
         _engine.Pause();
     }
@@ -289,6 +298,13 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
         RunOnUiThread(() =>
         {
             HasRenderedFirstFrame = true;
+            if (!_autoPlayAfterFirstFrame)
+            {
+                IsPreparing = false;
+                IsPlaying = false;
+                IsPaused = true;
+            }
+
             FirstFrameRendered?.Invoke();
         });
     }
@@ -329,6 +345,7 @@ public partial class MpvVideoPlayerControl : UserControl, IDisposable
         IsPlaying = false;
         IsPaused = false;
         HasRenderedFirstFrame = false;
+        _autoPlayAfterFirstFrame = false;
     }
 
     private void ThrowIfDisposed()
@@ -353,6 +370,7 @@ internal sealed class MpvVideoPlaybackEngine : IDisposable
     private long _displayWidth;
     private long _displayHeight;
     private bool _hasShownVideoSurface;
+    private bool _autoPlayAfterFirstFrame;
     private bool _isInitialized;
     private bool _isDisposed;
 
@@ -382,19 +400,12 @@ internal sealed class MpvVideoPlaybackEngine : IDisposable
     public event Action? EndReached;
     public event Action? PlaybackError;
 
-    public static Task<ArraySegment<byte>?> TryRenderFirstFramePngAsync(
-        ArraySegment<byte> videoData,
-        TimeSpan timeout,
-        CancellationToken cancellationToken)
-    {
-        return Task.Run(() => TryRenderFirstFramePng(videoData, timeout, cancellationToken), cancellationToken);
-    }
-
-    public void Play()
+    public void Load(bool autoPlayAfterFirstFrame)
     {
         lock (_mpvLock)
         {
             ThrowIfDisposed();
+            _autoPlayAfterFirstFrame = autoPlayAfterFirstFrame;
             EnsureInitialized();
             MpvNative.Check(MpvNative.CommandString(_mpv, "set pause yes"), "mpv 无法准备首帧。");
             MpvNative.Check(MpvNative.CommandString(_mpv, $"loadfile {StreamUri} replace"), "mpv 无法载入内存视频流。");
@@ -597,7 +608,10 @@ internal sealed class MpvVideoPlaybackEngine : IDisposable
 
         _hasShownVideoSurface = true;
         FirstFrameRendered?.Invoke();
-        Task.Run(() => ExecuteCommand("set pause no"));
+        if (_autoPlayAfterFirstFrame)
+        {
+            Task.Run(() => ExecuteCommand("set pause no"));
+        }
     }
 
     private void NotifyVideoSizeIfReady()
@@ -663,16 +677,6 @@ internal sealed class MpvVideoPlaybackEngine : IDisposable
         }
     }
 
-    private sealed class CoverFrameStreamSource
-    {
-        public CoverFrameStreamSource(ArraySegment<byte> videoData)
-        {
-            VideoData = videoData;
-        }
-
-        public ArraySegment<byte> VideoData { get; }
-    }
-
     private sealed class MpvStreamCookie : IDisposable
     {
         private readonly ArraySegment<byte> _data;
@@ -730,22 +734,13 @@ internal sealed class MpvVideoPlaybackEngine : IDisposable
     {
         try
         {
-            ArraySegment<byte> videoData;
             var streamSource = GCHandle.FromIntPtr(userData).Target;
-            if (streamSource is MpvVideoPlaybackEngine session)
-            {
-                videoData = session.VideoData;
-            }
-            else if (streamSource is CoverFrameStreamSource source)
-            {
-                videoData = source.VideoData;
-            }
-            else
+            if (streamSource is not MpvVideoPlaybackEngine session)
             {
                 return -1;
             }
 
-            var cookie = new MpvStreamCookie(videoData);
+            var cookie = new MpvStreamCookie(session.VideoData);
             var cookieHandle = GCHandle.Alloc(cookie);
             var streamInfo = Marshal.PtrToStructure<MpvStreamCbInfo>(info);
             streamInfo.Cookie = GCHandle.ToIntPtr(cookieHandle);
@@ -801,107 +796,6 @@ internal sealed class MpvVideoPlaybackEngine : IDisposable
         {
             cookie.Cancel();
         }
-    }
-
-    private static ArraySegment<byte>? TryRenderFirstFramePng(
-        ArraySegment<byte> videoData,
-        TimeSpan timeout,
-        CancellationToken cancellationToken)
-    {
-        if (videoData.Array is null)
-        {
-            return null;
-        }
-
-        var source = new CoverFrameStreamSource(videoData);
-        var sourceHandle = GCHandle.Alloc(source);
-        var tempDir = Path.Combine(Path.GetTempPath(), "ComicViewer", "mpv-cover-" + Guid.NewGuid().ToString("N"));
-        IntPtr mpv = IntPtr.Zero;
-        try
-        {
-            Directory.CreateDirectory(tempDir);
-            mpv = MpvNative.Create();
-            if (mpv == IntPtr.Zero)
-            {
-                return null;
-            }
-
-            SetCoverOption(mpv, "config", "no");
-            SetCoverOption(mpv, "terminal", "no");
-            SetCoverOption(mpv, "osc", "no");
-            SetCoverOption(mpv, "audio", "no");
-            SetCoverOption(mpv, "vo", "image");
-            SetCoverOption(mpv, "vo-image-format", "png");
-            SetCoverOption(mpv, "vo-image-outdir", tempDir);
-            SetCoverOption(mpv, "frames", "1");
-
-            if (MpvNative.Initialize(mpv) < 0
-                || MpvNative.StreamCbAddRo(mpv, "comic", GCHandle.ToIntPtr(sourceHandle), MpvNative.OpenStreamCallback) < 0
-                || MpvNative.CommandString(mpv, $"loadfile {StreamUri} replace") < 0)
-            {
-                return null;
-            }
-
-            var stopwatch = Stopwatch.StartNew();
-            while (stopwatch.Elapsed < timeout)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var eventPtr = MpvNative.WaitEvent(mpv, 0.1);
-                if (eventPtr == IntPtr.Zero)
-                {
-                    continue;
-                }
-
-                var mpvEvent = Marshal.PtrToStructure<MpvEvent>(eventPtr);
-                if (mpvEvent.EventId is MpvEventId.EndFile or MpvEventId.Shutdown)
-                {
-                    break;
-                }
-            }
-
-            var framePath = Directory
-                .EnumerateFiles(tempDir, "*.png", SearchOption.TopDirectoryOnly)
-                .OrderByDescending(File.GetLastWriteTimeUtc)
-                .FirstOrDefault();
-            if (framePath is null)
-            {
-                return null;
-            }
-
-            return new ArraySegment<byte>(File.ReadAllBytes(framePath));
-        }
-        catch
-        {
-            return null;
-        }
-        finally
-        {
-            if (mpv != IntPtr.Zero)
-            {
-                MpvNative.TerminateDestroy(mpv);
-            }
-
-            if (sourceHandle.IsAllocated)
-            {
-                sourceHandle.Free();
-            }
-
-            try
-            {
-                if (Directory.Exists(tempDir))
-                {
-                    Directory.Delete(tempDir, recursive: true);
-                }
-            }
-            catch
-            {
-            }
-        }
-    }
-
-    private static void SetCoverOption(IntPtr mpv, string name, string value)
-    {
-        _ = MpvNative.SetOptionString(mpv, name, value);
     }
 
     private static class MpvNative
@@ -1000,6 +894,16 @@ public sealed class MpvOpenGlVideoView : GLWpfControl
     }
 
     public event Action? FirstFrameRendered;
+
+    public BitmapSource? CaptureCurrentFrame()
+    {
+        if (Dispatcher.CheckAccess())
+        {
+            return CaptureCurrentFrameCore();
+        }
+
+        return Dispatcher.Invoke(CaptureCurrentFrameCore);
+    }
 
     public Task WaitForReadyAsync(TimeSpan timeout, CancellationToken cancellationToken)
     {
@@ -1122,6 +1026,8 @@ public sealed class MpvOpenGlVideoView : GLWpfControl
             return 0;
         }
 
+        _hasRenderedFrame = false;
+        _forceRender = true;
         StartControl();
         if (!_ready.Task.IsCompletedSuccessfully)
         {
@@ -1243,7 +1149,50 @@ public sealed class MpvOpenGlVideoView : GLWpfControl
             MpvRenderNative.RenderContextSetUpdateCallback(_renderContext, null, IntPtr.Zero);
             MpvRenderNative.RenderContextFree(_renderContext);
             _renderContext = IntPtr.Zero;
+            _hasRenderedFrame = false;
+            _forceRender = true;
         }
+    }
+
+    private BitmapSource? CaptureCurrentFrameCore()
+    {
+        if (!_hasRenderedFrame || !TryMakeCurrent())
+        {
+            return null;
+        }
+
+        var width = Math.Max(1, FrameBufferWidth);
+        var height = Math.Max(1, FrameBufferHeight);
+        var stride = width * 4;
+        var bottomUpPixels = new byte[stride * height];
+        var topDownPixels = new byte[bottomUpPixels.Length];
+
+        GL.BindFramebuffer(FramebufferTarget.Framebuffer, Framebuffer);
+        GL.ReadPixels(
+            0,
+            0,
+            width,
+            height,
+            OpenTK.Graphics.OpenGL4.PixelFormat.Bgra,
+            PixelType.UnsignedByte,
+            bottomUpPixels);
+
+        for (var row = 0; row < height; row++)
+        {
+            System.Buffer.BlockCopy(bottomUpPixels, row * stride, topDownPixels, (height - row - 1) * stride, stride);
+        }
+
+        var bitmap = BitmapSource.Create(
+            width,
+            height,
+            96,
+            96,
+            PixelFormats.Bgra32,
+            null,
+            topDownPixels,
+            stride);
+        bitmap.Freeze();
+        return bitmap;
     }
 
     private bool TryMakeCurrent()

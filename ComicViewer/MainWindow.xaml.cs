@@ -26,10 +26,13 @@ public partial class MainWindow : Window
     private ArchiveSession? _archiveSession;
     private CancellationTokenSource? _mediaLoadCts;
     private CancellationTokenSource? _videoPlayCts;
+    private CancellationTokenSource? _videoCoverCts;
     private CancellationTokenSource? _imageDecodeDebounceCts;
     private Task? _mediaLoadTask;
     private TaskCompletionSource<string?>? _passwordPrompt;
     private ScrollViewer? _pagesScrollViewer;
+    private MpvVideoPlayerControl? _sharedVideoPlayer;
+    private ComicPage? _sharedVideoPage;
     private string? _archivePath;
     private double _pageWidth = 800;
     private int _cacheGeneration;
@@ -50,6 +53,9 @@ public partial class MainWindow : Window
         WindowBackdropHelper.Apply(this);
 
         DataContext = this;
+        _sharedVideoPlayer = CreateVideoPlayer();
+        VideoCoverGeneratorHost.Content = _sharedVideoPlayer;
+        AttachPlaybackEvents(_sharedVideoPlayer);
         LoadPasswordHistory();
 
         Loaded += MainWindow_Loaded;
@@ -57,7 +63,9 @@ public partial class MainWindow : Window
         {
             StopMediaLoader();
             CancelVideoPlayLoad();
+            CancelVideoCoverGeneration();
             StopAllVideos();
+            DisposeSharedVideoPlayer();
             DisposeArchiveSession();
         };
     }
@@ -347,6 +355,7 @@ public partial class MainWindow : Window
         _archivePath = null;
         StopMediaLoader();
         CancelVideoPlayLoad();
+        CancelVideoCoverGeneration();
         StopAllVideos();
         DisposeArchiveSession();
         Pages.Clear();

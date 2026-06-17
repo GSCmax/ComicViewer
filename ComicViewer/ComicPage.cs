@@ -47,7 +47,9 @@ public sealed class ComicPage : INotifyPropertyChanged
 
     public bool IsVideo => MediaType == ComicMediaType.Video;
 
-    public bool IsLoaded => IsImage ? Image is not null : VideoFrame is not null;
+    public bool IsLoaded => IsImage
+        ? Image is not null
+        : VideoFrame is not null || _videoPlayer?.HasRenderedFirstFrame == true;
 
     public ArraySegment<byte>? EncodedImageData => _encodedImageData;
 
@@ -59,7 +61,8 @@ public sealed class ComicPage : INotifyPropertyChanged
 
     public FrameworkElement? PlaybackElement => _videoPlayer;
 
-    public bool IsPlaybackHostVisible => IsVideoPlaying || IsVideoPreparing;
+    public bool IsPlaybackHostVisible => _videoPlayer is not null
+        && (IsVideoPlaying || IsVideoPreparing || IsVideoPaused || _videoPlayer.HasRenderedFirstFrame);
 
     public double PlaybackHostWidth => DisplayWidth;
 
@@ -94,6 +97,8 @@ public sealed class ComicPage : INotifyPropertyChanged
         }
     }
 
+    public bool HasVideoFrame => VideoFrame is not null;
+
     public bool IsVideoPlaying => _videoPlayer?.IsPlaying == true;
 
     public bool IsVideoPreparing => _videoPlayer?.IsPreparing == true;
@@ -101,6 +106,8 @@ public sealed class ComicPage : INotifyPropertyChanged
     public bool IsVideoPaused => _videoPlayer?.IsPaused == true;
 
     public bool ShouldShowVideoFrame => VideoFrame is not null && _videoPlayer?.HasRenderedFirstFrame != true;
+
+    public VideoCoverLoadStatus CoverLoadStatus => _coverLoadStatus;
 
     public string VideoTimeText => IsVideo
         ? $"{FormatVideoTime(_videoPositionMs)}/{FormatVideoTime(_videoDurationMs)}"
@@ -209,10 +216,12 @@ public sealed class ComicPage : INotifyPropertyChanged
         {
             _coverLoadStatus = status;
             OnPropertyChanged(nameof(VideoOverlayText));
+            OnPropertyChanged(nameof(IsLoaded));
+            OnPropertyChanged(nameof(CoverLoadStatus));
         }
     }
 
-    public void SetVideoPlayer(MpvVideoPlayerControl player)
+    public void SetVideoPlayer(MpvVideoPlayerControl? player)
     {
         _videoPlayer = player;
         OnPropertyChanged(nameof(PlaybackElement));
@@ -274,8 +283,13 @@ public sealed class ComicPage : INotifyPropertyChanged
 
     public void StopVideo()
     {
+        _videoPlayer?.Stop();
+        DetachVideoPlayer();
+    }
+
+    public void DetachVideoPlayer()
+    {
         SetVideoPosition(0);
-        DisposePlayerInBackground(_videoPlayer);
         _videoPlayer = null;
         OnPropertyChanged(nameof(PlaybackElement));
         NotifyPlaybackStateChanged();
@@ -303,6 +317,7 @@ public sealed class ComicPage : INotifyPropertyChanged
         OnPropertyChanged(nameof(PlaybackHostWidth));
         OnPropertyChanged(nameof(PlaybackHostHeight));
         OnPropertyChanged(nameof(VideoOverlayText));
+        OnPropertyChanged(nameof(IsLoaded));
         OnPropertyChanged(nameof(ShouldShowVideoFrame));
     }
 
@@ -314,23 +329,4 @@ public sealed class ComicPage : INotifyPropertyChanged
             : time.ToString(@"m\:ss", CultureInfo.InvariantCulture);
     }
 
-    private static void DisposePlayerInBackground(MpvVideoPlayerControl? player)
-    {
-        if (player is null)
-        {
-            return;
-        }
-
-        _ = Task.Run(() =>
-        {
-            try
-            {
-                player.Stop();
-                player.Dispose();
-            }
-            catch
-            {
-            }
-        });
-    }
 }

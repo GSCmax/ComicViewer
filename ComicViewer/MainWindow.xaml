@@ -85,19 +85,19 @@
             </Style.Triggers>
         </Style>
 
-        <Style x:Key="VideoFrameVisibilityStyle" TargetType="{x:Type Image}">
+        <Style x:Key="VideoPlaybackHostVisibilityStyle" TargetType="{x:Type ContentControl}">
             <Setter Property="Visibility" Value="Collapsed" />
             <Style.Triggers>
-                <DataTrigger Binding="{Binding ShouldShowVideoFrame}" Value="True">
+                <DataTrigger Binding="{Binding IsPlaybackHostVisible}" Value="True">
                     <Setter Property="Visibility" Value="Visible" />
                 </DataTrigger>
             </Style.Triggers>
         </Style>
 
-        <Style x:Key="VideoPlaybackHostVisibilityStyle" TargetType="{x:Type ContentControl}">
+        <Style x:Key="VideoFrameVisibilityStyle" TargetType="{x:Type Image}">
             <Setter Property="Visibility" Value="Collapsed" />
             <Style.Triggers>
-                <DataTrigger Binding="{Binding IsPlaybackHostVisible}" Value="True">
+                <DataTrigger Binding="{Binding ShouldShowVideoFrame}" Value="True">
                     <Setter Property="Visibility" Value="Visible" />
                 </DataTrigger>
             </Style.Triggers>
@@ -580,6 +580,16 @@
                 </DataTemplate>
             </ListBox.ItemTemplate>
         </ListBox>
+
+        <ContentControl x:Name="VideoCoverGeneratorHost"
+                        Grid.Row="1"
+                        Width="480"
+                        Height="270"
+                        HorizontalAlignment="Left"
+                        VerticalAlignment="Top"
+                        IsHitTestVisible="False"
+                        Opacity="0"
+                        Panel.ZIndex="-1" />
 
         <Grid x:Name="PasswordOverlay"
               Grid.Row="1"
