@@ -159,6 +159,7 @@ internal sealed class HeadlessMpvVideoThumbnailProvider : IVideoThumbnailProvide
 
     private sealed class HeadlessMpvSession : IDisposable, IMpvMemoryStreamSource
     {
+        private const int StopDrainTimeoutMilliseconds = 200;
         private const string StreamUriPrefix = "comicthumb://media/";
 
         private readonly GCHandle _streamUserDataHandle;
@@ -223,15 +224,18 @@ internal sealed class HeadlessMpvVideoThumbnailProvider : IVideoThumbnailProvide
                 return;
             }
 
-            _ = MpvClientNative.CommandString(_mpv, "stop");
-            HasEnded = false;
-            CanCaptureFrame = false;
-            PumpEvents();
             lock (_sourceLock)
             {
                 _currentStreamUri = null;
                 _currentStreamOpened = false;
             }
+
+            HasEnded = false;
+            CanCaptureFrame = false;
+            _ = MpvClientNative.CommandString(_mpv, "stop");
+            DrainEventsAfterStop();
+            HasEnded = false;
+            CanCaptureFrame = false;
         }
 
         public void PumpEvents()
@@ -260,6 +264,25 @@ internal sealed class HeadlessMpvVideoThumbnailProvider : IVideoThumbnailProvide
                     && (mpvEvent.EventId is MpvEventId.FileLoaded or MpvEventId.VideoReconfig or MpvEventId.PlaybackRestart))
                 {
                     CanCaptureFrame = true;
+                }
+            }
+        }
+
+        private void DrainEventsAfterStop()
+        {
+            var deadline = DateTime.UtcNow.AddMilliseconds(StopDrainTimeoutMilliseconds);
+            while (DateTime.UtcNow < deadline)
+            {
+                var eventPtr = MpvClientNative.WaitEvent(_mpv, 0.02);
+                if (eventPtr == IntPtr.Zero)
+                {
+                    return;
+                }
+
+                var mpvEvent = Marshal.PtrToStructure<MpvEvent>(eventPtr);
+                if (mpvEvent.EventId is MpvEventId.None or MpvEventId.EndFile or MpvEventId.Idle or MpvEventId.Shutdown)
+                {
+                    return;
                 }
             }
         }

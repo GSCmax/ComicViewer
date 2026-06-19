@@ -127,6 +127,7 @@ public partial class MainWindow
         {
             videoStream?.Dispose();
             FinishVideoPlayLoad(playCts);
+            ScheduleVideoCoverGeneration();
         }
     }
 
@@ -299,8 +300,7 @@ public partial class MainWindow
         var archivePath = _archivePath;
         if (archivePath is null
             || _videoCoverCts is not null
-            || _videoPlayCts is not null
-            || _sharedVideoPage is not null)
+            || _videoPlayCts is not null)
         {
             return;
         }
@@ -385,7 +385,6 @@ public partial class MainWindow
             if (ReferenceEquals(_videoCoverCts, coverCts))
             {
                 _videoCoverCts = null;
-                StopSharedVideoPlayer();
             }
 
             coverCts.Dispose();
@@ -440,7 +439,6 @@ public partial class MainWindow
         return ReferenceEquals(_videoCoverCts, coverCts)
             && !coverCts.IsCancellationRequested
             && _videoPlayCts is null
-            && _sharedVideoPage is null
             && string.Equals(_archivePath, archivePath, StringComparison.Ordinal);
     }
 
