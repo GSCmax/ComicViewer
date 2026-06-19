@@ -4,7 +4,7 @@ namespace ComicViewer;
 
 internal interface IMpvMemoryStreamSource
 {
-    ArraySegment<byte> GetStreamData();
+    bool TryGetStreamData(string? uri, out ArraySegment<byte> data);
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -62,7 +62,13 @@ internal static class MpvMemoryStream
                 return -1;
             }
 
-            var cookie = new Cookie(source.GetStreamData());
+            var streamUri = Marshal.PtrToStringAnsi(uri);
+            if (!source.TryGetStreamData(streamUri, out var data))
+            {
+                return -1;
+            }
+
+            var cookie = new Cookie(data);
             var cookieHandle = GCHandle.Alloc(cookie);
             var streamInfo = Marshal.PtrToStructure<MpvStreamCbInfo>(info);
             streamInfo.Cookie = GCHandle.ToIntPtr(cookieHandle);

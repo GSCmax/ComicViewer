@@ -1,4 +1,5 @@
 using System.IO;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -158,17 +159,20 @@ internal sealed class HeadlessMpvVideoThumbnailProvider : IVideoThumbnailProvide
 
     private sealed class HeadlessMpvSession : IDisposable, IMpvMemoryStreamSource
     {
-        private const string StreamUri = "comicthumb://media";
+        private const string StreamUriPrefix = "comicthumb://media/";
 
         private readonly GCHandle _streamUserDataHandle;
         private readonly object _sourceLock = new();
-        private ArraySegment<byte> _videoData;
+        private ArraySegment<byte> _currentVideoData;
+        private string? _currentStreamUri;
+        private long _loadId;
+        private bool _currentStreamOpened;
         private IntPtr _mpv;
         private bool _isDisposed;
 
         public HeadlessMpvSession()
         {
-            _videoData = default;
+            _currentVideoData = default;
             _streamUserDataHandle = GCHandle.Alloc(this);
             _mpv = MpvClientNative.Create();
             MpvClientNative.Check(_mpv != IntPtr.Zero ? 0 : -1, "创建 mpv 缩略图实例失败。");
@@ -179,34 +183,37 @@ internal sealed class HeadlessMpvVideoThumbnailProvider : IVideoThumbnailProvide
 
         public bool CanCaptureFrame { get; private set; }
 
-        private ArraySegment<byte> VideoData
+        public bool TryGetStreamData(string? uri, out ArraySegment<byte> data)
         {
-            get
+            lock (_sourceLock)
             {
-                lock (_sourceLock)
+                if (!string.Equals(uri, _currentStreamUri, StringComparison.Ordinal))
                 {
-                    return _videoData;
+                    data = default;
+                    return false;
                 }
-            }
-        }
 
-        public ArraySegment<byte> GetStreamData()
-        {
-            return VideoData;
+                _currentStreamOpened = true;
+                data = _currentVideoData;
+                return data.Array is not null;
+            }
         }
 
         public void Load(ArraySegment<byte> videoData)
         {
             ThrowIfDisposed();
             Stop();
+            var streamUri = CreateStreamUri();
             lock (_sourceLock)
             {
-                _videoData = videoData;
+                _currentVideoData = videoData;
+                _currentStreamUri = streamUri;
+                _currentStreamOpened = false;
             }
 
             HasEnded = false;
             CanCaptureFrame = false;
-            MpvClientNative.Check(MpvClientNative.CommandString(_mpv, $"loadfile {StreamUri} replace"), "mpv 无法载入缩略图视频流。");
+            MpvClientNative.Check(MpvClientNative.CommandString(_mpv, $"loadfile {streamUri} replace"), "mpv 无法载入缩略图视频流。");
         }
 
         public void Stop()
@@ -220,6 +227,11 @@ internal sealed class HeadlessMpvVideoThumbnailProvider : IVideoThumbnailProvide
             HasEnded = false;
             CanCaptureFrame = false;
             PumpEvents();
+            lock (_sourceLock)
+            {
+                _currentStreamUri = null;
+                _currentStreamOpened = false;
+            }
         }
 
         public void PumpEvents()
@@ -238,12 +250,14 @@ internal sealed class HeadlessMpvVideoThumbnailProvider : IVideoThumbnailProvide
                     return;
                 }
 
-                if (mpvEvent.EventId is MpvEventId.EndFile or MpvEventId.Shutdown)
+                var currentStreamOpened = IsCurrentStreamOpened();
+                if (currentStreamOpened && (mpvEvent.EventId is MpvEventId.EndFile or MpvEventId.Shutdown))
                 {
                     HasEnded = true;
                 }
 
-                if (mpvEvent.EventId is MpvEventId.FileLoaded or MpvEventId.VideoReconfig or MpvEventId.PlaybackRestart)
+                if (currentStreamOpened
+                    && (mpvEvent.EventId is MpvEventId.FileLoaded or MpvEventId.VideoReconfig or MpvEventId.PlaybackRestart))
                 {
                     CanCaptureFrame = true;
                 }
@@ -281,6 +295,20 @@ internal sealed class HeadlessMpvVideoThumbnailProvider : IVideoThumbnailProvide
             if (_isDisposed || _mpv == IntPtr.Zero)
             {
                 throw new ObjectDisposedException(nameof(HeadlessMpvSession));
+            }
+        }
+
+        private string CreateStreamUri()
+        {
+            var loadId = Interlocked.Increment(ref _loadId);
+            return StreamUriPrefix + loadId.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private bool IsCurrentStreamOpened()
+        {
+            lock (_sourceLock)
+            {
+                return _currentStreamOpened;
             }
         }
 

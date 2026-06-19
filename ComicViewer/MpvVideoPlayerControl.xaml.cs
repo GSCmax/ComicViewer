@@ -418,9 +418,16 @@ internal sealed class MpvVideoPlaybackEngine : IDisposable, IMpvMemoryStreamSour
         }
     }
 
-    public ArraySegment<byte> GetStreamData()
+    public bool TryGetStreamData(string? uri, out ArraySegment<byte> data)
     {
-        return VideoData;
+        if (!string.Equals(uri, StreamUri, StringComparison.Ordinal))
+        {
+            data = default;
+            return false;
+        }
+
+        data = VideoData;
+        return data.Array is not null;
     }
 
     public MpvVideoPlaybackEngine(ArraySegment<byte> videoData, MpvOpenGlVideoView view)
