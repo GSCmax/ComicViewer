@@ -15,7 +15,7 @@
     <shell:WindowChrome.WindowChrome>
         <shell:WindowChrome CaptionHeight="40"
                             CornerRadius="0"
-                            GlassFrameThickness="0"
+                            GlassFrameThickness="1"
                             ResizeBorderThickness="6" />
     </shell:WindowChrome.WindowChrome>
 

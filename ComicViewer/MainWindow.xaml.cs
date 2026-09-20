@@ -142,7 +142,22 @@ public partial class MainWindow : Window
             return;
         }
 
-        var offset = GetNavigationKey(e) switch
+        var key = GetNavigationKey(e);
+        if (key == Key.Home)
+        {
+            ScrollPageToTop(0);
+            e.Handled = true;
+            return;
+        }
+
+        if (key == Key.End)
+        {
+            ScrollPageToTop(Pages.Count - 1);
+            e.Handled = true;
+            return;
+        }
+
+        var offset = key switch
         {
             Key.PageUp => -1,
             Key.PageDown => 1,
