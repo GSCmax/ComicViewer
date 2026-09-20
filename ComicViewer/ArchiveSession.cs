@@ -4,136 +4,121 @@ using System.IO;
 
 namespace ComicViewer;
 
-internal sealed class ArchiveSession : IDisposable
+internal sealed class ArchiveSession : IMediaArchive
 {
     private readonly IArchive _archive;
-    private readonly List<IArchiveEntry> _entries;
-    private readonly SemaphoreSlim _archiveLock = new(1, 1);
-    private bool _isDisposed;
+    private readonly IArchiveEntry[] _entries;
 
-    private ArchiveSession(IArchive archive, List<IArchiveEntry> entries, IReadOnlyList<ComicArchiveEntry> mediaEntries)
+    private ArchiveSession(IArchive archive, IArchiveEntry[] entries)
     {
         _archive = archive;
         _entries = entries;
-        MediaEntries = mediaEntries;
+        MediaEntries = entries.Select(entry => new ComicArchiveEntry(entry.Key!, MediaFileClassifier.GetMediaType(entry.Key!), entry.Size)).ToArray();
     }
 
     public IReadOnlyList<ComicArchiveEntry> MediaEntries { get; }
 
     public static ArchiveSession Open(string archivePath, string? password)
     {
-        var archive = ArchiveFactory.OpenArchive(archivePath, new ReaderOptions
-        {
-            Password = password
-        });
-
+        var archive = ArchiveFactory.OpenArchive(archivePath, new ReaderOptions { Password = password });
         try
         {
-            var entries = archive.Entries
-                .Where(entry => !entry.IsDirectory && entry.Key is not null)
-                .ToList();
-            var mediaEntries = entries
-                .Where(entry => MediaFileClassifier.IsSupported(entry.Key))
-                .OrderBy(entry => entry.Key, NaturalFileNameComparer.Instance)
-                .Select(entry => new ComicArchiveEntry(entry.Key!, MediaFileClassifier.GetMediaType(entry.Key!), entry.Size))
-                .ToList();
-
-            var firstEntry = mediaEntries.FirstOrDefault();
-            if (firstEntry is not null)
+            // Indexes also distinguish entries with duplicate names.
+            var entries = archive.Entries.Where(entry => !entry.IsDirectory && MediaFileClassifier.IsSupported(entry.Key))
+                .OrderBy(entry => entry.Key, NaturalFileNameComparer.Instance).ToArray();
+            if (entries.Length > 0)
             {
-                using var stream = entries.First(entry => string.Equals(entry.Key, firstEntry.Key, StringComparison.Ordinal)).OpenEntryStream();
+                using var stream = entries[0].OpenEntryStream();
                 _ = stream.ReadByte();
             }
-
-            return new ArchiveSession(archive, entries, mediaEntries);
+            return new ArchiveSession(archive, entries);
         }
-        catch
-        {
-            archive.Dispose();
-            throw;
-        }
+        catch { archive.Dispose(); throw; }
     }
 
-    public MemoryStream CopyEntryToMemory(string entryKey, CancellationToken cancellationToken, long maxBytes)
+    // ReaderSession serializes reads and waits for them before disposal.
+    public ArraySegment<byte> ReadEntry(int index, CancellationToken cancellationToken, long maxBytes)
     {
-        if (maxBytes <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(maxBytes), "Maximum entry size must be positive.");
-        }
+        var entry = _entries[index];
+        if (entry.Size > maxBytes) throw new MediaTooLargeException();
+        using var source = entry.OpenEntryStream();
+        return ReadEntryData(source, entry.Size, cancellationToken, maxBytes);
+    }
 
-        _archiveLock.Wait(cancellationToken);
+    internal static ArraySegment<byte> ReadEntryData(Stream source, long size, CancellationToken token, long maxBytes)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(size);
+        if (size > maxBytes) throw new MediaTooLargeException();
+        var data = new byte[checked((int)size)];
+        // ZIP/RAR indexes provide the payload length. Read directly into its final
+        // buffer, excluding encrypted RAR padding and detecting truncated entries.
+        for (var offset = 0; offset < data.Length;)
+        {
+            token.ThrowIfCancellationRequested();
+            var count = Math.Min(128 * 1024, data.Length - offset);
+            source.ReadExactly(data, offset, count);
+            offset += count;
+        }
+        return new(data);
+    }
+
+    public void Dispose() => _archive.Dispose();
+
+    public static async Task<ArchiveSession> OpenAsync(string path, string? password, CancellationToken token)
+    {
+        var archive = await Task.Run(() => Open(path, password), token).ConfigureAwait(false);
+        if (!token.IsCancellationRequested) return archive;
+        archive.Dispose();
+        token.ThrowIfCancellationRequested();
+        return archive;
+    }
+
+    public static bool IsPasswordError(Exception exception)
+    {
+        var message = exception.ToString();
+        return message.Contains("password", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("encrypted", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("crypt", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static async Task<KnownPasswordResult?> TryKnownAsync(string path, IReadOnlyList<string> passwords, CancellationToken token)
+    {
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(token);
+        KnownPasswordResult? result = null;
+        Exception? failure = null;
         try
         {
-            ThrowIfDisposed();
-            var entry = _entries.FirstOrDefault(entry => string.Equals(entry.Key, entryKey, StringComparison.Ordinal))
-                ?? throw new FileNotFoundException("Entry not found in archive.", entryKey);
-
-            if (entry.Size > maxBytes)
+            await Parallel.ForEachAsync(passwords, new ParallelOptions
             {
-                throw new InvalidOperationException("Entry exceeds the in-memory load limit.");
-            }
-
-            using var source = entry.OpenEntryStream();
-            var destination = entry.Size is > 0 and <= int.MaxValue
-                ? new MemoryStream(checked((int)entry.Size))
-                : new MemoryStream();
-            CopyToMemory(source, destination, cancellationToken, maxBytes);
-            destination.Position = 0;
-            return destination;
+                CancellationToken = stop.Token,
+                MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount / 2, 2, 4)
+            }, async (password, ct) =>
+            {
+                try
+                {
+                    var session = await OpenAsync(path, password, ct);
+                    var candidate = new KnownPasswordResult(password, session);
+                    if (Interlocked.CompareExchange(ref result, candidate, null) is null) stop.Cancel();
+                    else session.Dispose();
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+                catch (Exception ex) when (IsPasswordError(ex)) { }
+                catch (Exception ex)
+                {
+                    Interlocked.CompareExchange(ref failure, ex, null);
+                    stop.Cancel();
+                }
+            });
         }
-        finally
+        catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+        if (token.IsCancellationRequested)
         {
-            _archiveLock.Release();
+            result?.Session.Dispose();
+            token.ThrowIfCancellationRequested();
         }
+        if (result is null && failure is not null) throw failure;
+        return result;
     }
 
-    private static void CopyToMemory(Stream source, MemoryStream destination, CancellationToken cancellationToken, long maxBytes)
-    {
-        var buffer = new byte[128 * 1024];
-        var totalBytesRead = 0L;
-        while (true)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var bytesRead = source.Read(buffer, 0, buffer.Length);
-            if (bytesRead == 0)
-            {
-                return;
-            }
-
-            if (totalBytesRead > maxBytes - bytesRead)
-            {
-                throw new InvalidOperationException("Entry exceeds the in-memory load limit.");
-            }
-
-            destination.Write(buffer, 0, bytesRead);
-            totalBytesRead += bytesRead;
-        }
-    }
-
-    private void ThrowIfDisposed()
-    {
-        if (_isDisposed)
-        {
-            throw new ObjectDisposedException(nameof(ArchiveSession));
-        }
-    }
-
-    public void Dispose()
-    {
-        _archiveLock.Wait();
-        try
-        {
-            if (_isDisposed)
-            {
-                return;
-            }
-
-            _isDisposed = true;
-            _archive.Dispose();
-        }
-        finally
-        {
-            _archiveLock.Release();
-        }
-    }
+    internal sealed record KnownPasswordResult(string Password, ArchiveSession Session);
 }

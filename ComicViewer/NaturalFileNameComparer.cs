@@ -1,5 +1,3 @@
-using System.Globalization;
-
 namespace ComicViewer;
 
 internal sealed class NaturalFileNameComparer : IComparer<string?>
@@ -66,8 +64,8 @@ internal sealed class NaturalFileNameComparer : IComparer<string?>
             iy++;
         }
 
-        var chunkX = x[startX..ix].TrimStart('0');
-        var chunkY = y[startY..iy].TrimStart('0');
+        var chunkX = x.AsSpan(startX, ix - startX).TrimStart('0');
+        var chunkY = y.AsSpan(startY, iy - startY).TrimStart('0');
         if (chunkX.Length == 0)
         {
             chunkX = "0";
@@ -84,7 +82,7 @@ internal sealed class NaturalFileNameComparer : IComparer<string?>
             return lengthComparison;
         }
 
-        var valueComparison = string.Compare(chunkX, chunkY, CultureInfo.InvariantCulture, CompareOptions.Ordinal);
+        var valueComparison = chunkX.SequenceCompareTo(chunkY);
         return valueComparison != 0 ? valueComparison : (ix - startX).CompareTo(iy - startY);
     }
 }

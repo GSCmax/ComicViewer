@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -11,8 +11,7 @@
     <SelfContained>false</SelfContained>
     <PublishSingleFile>false</PublishSingleFile>
     <PublishTrimmed>false</PublishTrimmed>
-    <DebugType>none</DebugType>
-    <DebugSymbols>false</DebugSymbols>
+    <DebugType>portable</DebugType>
   </PropertyGroup>
 
   <ItemGroup>
@@ -28,5 +27,10 @@
       <TargetPath>libmpv-2.dll</TargetPath>
     </Content>
   </ItemGroup>
+
+  <Target Name="CheckNativePlayer" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('$(MSBuildProjectDirectory)\Native\win-x64\libmpv-2.dll')"
+           Text="缺少 x64 libmpv-2.dll。请将原生库放入 ComicViewer/Native/win-x64；版本与校验说明见 README.md。" />
+  </Target>
 
 </Project>

@@ -1,628 +1,161 @@
-using System.IO;
-using System.Globalization;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 
 namespace ComicViewer;
 
-internal sealed class VideoThumbnailService : IDisposable
+// One serialized owner handles initialization, capture, stop and disposal.
+internal sealed class VideoThumbnailService : IDisposable, IMpvMemoryStreamSource
 {
-    private readonly IVideoThumbnailProvider _provider;
+    private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly object _sourceLock = new();
+    private GCHandle _streamHandle;
+    private IntPtr _mpv;
+    private ArraySegment<byte> _source;
+    private string? _uri;
+    private bool _opened;
+    private long _loadId;
+    private int _disposed;
 
-    public VideoThumbnailService(IVideoThumbnailProvider provider)
+    public async Task<BitmapSource?> GenerateAsync(ArraySegment<byte> videoData, CancellationToken token)
     {
-        _provider = provider;
-    }
-
-    public Task<VideoThumbnailImage?> GenerateAsync(
-        ArraySegment<byte> videoData,
-        Func<bool> isRequestCurrent,
-        CancellationToken cancellationToken)
-    {
-        return _provider.GenerateAsync(videoData, isRequestCurrent, cancellationToken);
-    }
-
-    public void Dispose()
-    {
-        if (_provider is IDisposable disposable)
-        {
-            disposable.Dispose();
-        }
-    }
-}
-
-internal interface IVideoThumbnailProvider
-{
-    Task<VideoThumbnailImage?> GenerateAsync(
-        ArraySegment<byte> videoData,
-        Func<bool> isRequestCurrent,
-        CancellationToken cancellationToken);
-}
-
-internal sealed class HeadlessMpvVideoThumbnailProvider : IVideoThumbnailProvider, IDisposable
-{
-    private const int TimeoutMilliseconds = 3000;
-    private const int ThumbnailWidth = 480;
-
-    private readonly SemaphoreSlim _generationGate = new(1, 1);
-    private readonly object _sessionLock = new();
-    private HeadlessMpvSession? _session;
-    private bool _isDisposed;
-
-    public Task<VideoThumbnailImage?> GenerateAsync(
-        ArraySegment<byte> videoData,
-        Func<bool> isRequestCurrent,
-        CancellationToken cancellationToken)
-    {
-        return Task.Run(async () =>
-        {
-            await _generationGate.WaitAsync(cancellationToken);
-            try
-            {
-                return GenerateCore(videoData, isRequestCurrent, cancellationToken);
-            }
-            finally
-            {
-                _generationGate.Release();
-            }
-        }, cancellationToken);
-    }
-
-    public void Dispose()
-    {
-        if (_isDisposed)
-        {
-            return;
-        }
-
-        _isDisposed = true;
-        _generationGate.Wait();
+        await _gate.WaitAsync(token).ConfigureAwait(false);
         try
         {
-            lock (_sessionLock)
-            {
-                _session?.Dispose();
-                _session = null;
-            }
+            ObjectDisposedException.ThrowIf(_disposed != 0, this);
+            return await Task.Run(() => Capture(videoData, token), token).ConfigureAwait(false);
         }
-        finally
-        {
-            _generationGate.Release();
-        }
-
-        _generationGate.Dispose();
+        finally { _gate.Release(); }
     }
 
-    private VideoThumbnailImage? GenerateCore(
-        ArraySegment<byte> videoData,
-        Func<bool> isRequestCurrent,
-        CancellationToken cancellationToken)
+    public bool TryGetStreamData(string? uri, out ArraySegment<byte> data)
     {
-        if (videoData.Array is null)
+        lock (_sourceLock)
         {
-            throw new ArgumentException("Video data must reference a byte array.", nameof(videoData));
+            data = _uri is not null && uri == _uri ? _source : default;
+            _opened |= data.Array is not null;
+            return data.Array is not null;
         }
+    }
 
-        ThrowIfDisposed();
-        var session = EnsureSession();
+    private BitmapSource? Capture(ArraySegment<byte> data, CancellationToken token)
+    {
+        Initialize();
+        var uri = "comicthumb://media/" + ++_loadId;
+        lock (_sourceLock) { _source = data; _uri = uri; _opened = false; }
         try
         {
-            session.Load(videoData);
-            var deadline = DateTime.UtcNow.AddMilliseconds(TimeoutMilliseconds);
-            while (DateTime.UtcNow < deadline)
+            MpvClientNative.Check(MpvClientNative.CommandString(_mpv, $"loadfile {uri} replace"), "视频封面载入失败。");
+            var timer = Stopwatch.StartNew();
+            var ready = false;
+            while (timer.ElapsedMilliseconds < 3000)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                if (!isRequestCurrent())
-                {
-                    return null;
-                }
-
-                session.PumpEvents();
-                if (session.CanCaptureFrame && session.TryCaptureThumbnail(out var image))
-                {
-                    return image;
-                }
-
-                if (session.HasEnded)
-                {
-                    return null;
-                }
-
-                Thread.Sleep(15);
+                token.ThrowIfCancellationRequested();
+                var evt = ReadEvent(0.015);
+                bool opened;
+                lock (_sourceLock) opened = _opened;
+                if (!opened) continue;
+                if (evt.EventId is MpvEventId.EndFile or MpvEventId.Shutdown) return null;
+                ready |= evt.EventId is MpvEventId.FileLoaded or MpvEventId.VideoReconfig or MpvEventId.PlaybackRestart;
+                if (ready && CaptureBitmap() is { } bitmap) return bitmap;
             }
-
             return null;
         }
         finally
         {
-            session.Stop();
-        }
-    }
-
-    private HeadlessMpvSession EnsureSession()
-    {
-        lock (_sessionLock)
-        {
-            ThrowIfDisposed();
-            return _session ??= new HeadlessMpvSession();
-        }
-    }
-
-    private void ThrowIfDisposed()
-    {
-        if (_isDisposed)
-        {
-            throw new ObjectDisposedException(nameof(HeadlessMpvVideoThumbnailProvider));
-        }
-    }
-
-    private sealed class HeadlessMpvSession : IDisposable, IMpvMemoryStreamSource
-    {
-        private const int StopDrainTimeoutMilliseconds = 200;
-        private const string StreamUriPrefix = "comicthumb://media/";
-
-        private readonly GCHandle _streamUserDataHandle;
-        private readonly object _sourceLock = new();
-        private ArraySegment<byte> _currentVideoData;
-        private string? _currentStreamUri;
-        private long _loadId;
-        private bool _currentStreamOpened;
-        private IntPtr _mpv;
-        private bool _isDisposed;
-
-        public HeadlessMpvSession()
-        {
-            _currentVideoData = default;
-            _streamUserDataHandle = GCHandle.Alloc(this);
-            _mpv = MpvClientNative.Create();
-            MpvClientNative.Check(_mpv != IntPtr.Zero ? 0 : -1, "创建 mpv 缩略图实例失败。");
-            Initialize();
-        }
-
-        public bool HasEnded { get; private set; }
-
-        public bool CanCaptureFrame { get; private set; }
-
-        public bool TryGetStreamData(string? uri, out ArraySegment<byte> data)
-        {
-            lock (_sourceLock)
-            {
-                if (!string.Equals(uri, _currentStreamUri, StringComparison.Ordinal))
-                {
-                    data = default;
-                    return false;
-                }
-
-                _currentStreamOpened = true;
-                data = _currentVideoData;
-                return data.Array is not null;
-            }
-        }
-
-        public void Load(ArraySegment<byte> videoData)
-        {
-            ThrowIfDisposed();
-            Stop();
-            var streamUri = CreateStreamUri();
-            lock (_sourceLock)
-            {
-                _currentVideoData = videoData;
-                _currentStreamUri = streamUri;
-                _currentStreamOpened = false;
-            }
-
-            HasEnded = false;
-            CanCaptureFrame = false;
-            MpvClientNative.Check(MpvClientNative.CommandString(_mpv, $"loadfile {streamUri} replace"), "mpv 无法载入缩略图视频流。");
-        }
-
-        public void Stop()
-        {
-            if (_isDisposed || _mpv == IntPtr.Zero)
-            {
-                return;
-            }
-
-            lock (_sourceLock)
-            {
-                _currentStreamUri = null;
-                _currentStreamOpened = false;
-            }
-
-            HasEnded = false;
-            CanCaptureFrame = false;
+            lock (_sourceLock) { _source = default; _uri = null; _opened = false; }
             _ = MpvClientNative.CommandString(_mpv, "stop");
-            DrainEventsAfterStop();
-            HasEnded = false;
-            CanCaptureFrame = false;
-        }
-
-        public void PumpEvents()
-        {
-            while (true)
-            {
-                var eventPtr = MpvClientNative.WaitEvent(_mpv, 0);
-                if (eventPtr == IntPtr.Zero)
-                {
-                    return;
-                }
-
-                var mpvEvent = Marshal.PtrToStructure<MpvEvent>(eventPtr);
-                if (mpvEvent.EventId == MpvEventId.None)
-                {
-                    return;
-                }
-
-                var currentStreamOpened = IsCurrentStreamOpened();
-                if (currentStreamOpened && (mpvEvent.EventId is MpvEventId.EndFile or MpvEventId.Shutdown))
-                {
-                    HasEnded = true;
-                }
-
-                if (currentStreamOpened
-                    && (mpvEvent.EventId is MpvEventId.FileLoaded or MpvEventId.VideoReconfig or MpvEventId.PlaybackRestart))
-                {
-                    CanCaptureFrame = true;
-                }
-            }
-        }
-
-        private void DrainEventsAfterStop()
-        {
-            var deadline = DateTime.UtcNow.AddMilliseconds(StopDrainTimeoutMilliseconds);
-            while (DateTime.UtcNow < deadline)
-            {
-                var eventPtr = MpvClientNative.WaitEvent(_mpv, 0.02);
-                if (eventPtr == IntPtr.Zero)
-                {
-                    return;
-                }
-
-                var mpvEvent = Marshal.PtrToStructure<MpvEvent>(eventPtr);
-                if (mpvEvent.EventId is MpvEventId.None or MpvEventId.EndFile or MpvEventId.Idle or MpvEventId.Shutdown)
-                {
-                    return;
-                }
-            }
-        }
-
-        public bool TryCaptureThumbnail(out VideoThumbnailImage? image)
-        {
-            ThrowIfDisposed();
-            return TryCaptureRawScreenshot(_mpv, out image);
-        }
-
-        public void Dispose()
-        {
-            if (_isDisposed)
-            {
-                return;
-            }
-
-            _isDisposed = true;
-            if (_mpv != IntPtr.Zero)
-            {
-                MpvClientNative.TerminateDestroy(_mpv);
-                _mpv = IntPtr.Zero;
-            }
-
-            if (_streamUserDataHandle.IsAllocated)
-            {
-                _streamUserDataHandle.Free();
-            }
-        }
-
-        private void ThrowIfDisposed()
-        {
-            if (_isDisposed || _mpv == IntPtr.Zero)
-            {
-                throw new ObjectDisposedException(nameof(HeadlessMpvSession));
-            }
-        }
-
-        private string CreateStreamUri()
-        {
-            var loadId = Interlocked.Increment(ref _loadId);
-            return StreamUriPrefix + loadId.ToString(CultureInfo.InvariantCulture);
-        }
-
-        private bool IsCurrentStreamOpened()
-        {
-            lock (_sourceLock)
-            {
-                return _currentStreamOpened;
-            }
-        }
-
-        private void Initialize()
-        {
-            MpvClientNative.Check(MpvClientNative.SetOptionString(_mpv, "config", "no"), "mpv 缩略图选项设置失败。");
-            MpvClientNative.Check(MpvClientNative.SetOptionString(_mpv, "terminal", "no"), "mpv 缩略图选项设置失败。");
-            MpvClientNative.Check(MpvClientNative.SetOptionString(_mpv, "osc", "no"), "mpv 缩略图选项设置失败。");
-            MpvClientNative.Check(MpvClientNative.SetOptionString(_mpv, "audio", "no"), "mpv 缩略图选项设置失败。");
-            MpvClientNative.Check(MpvClientNative.SetOptionString(_mpv, "vo", "null"), "mpv 缩略图视频输出设置失败。");
-            MpvClientNative.Check(MpvClientNative.SetOptionString(_mpv, "pause", "yes"), "mpv 缩略图暂停设置失败。");
-            _ = MpvClientNative.SetOptionString(_mpv, "vf", $"scale={ThumbnailWidth}:-2");
-            _ = MpvClientNative.SetOptionString(_mpv, "cache", "no");
-            _ = MpvClientNative.SetOptionString(_mpv, "hwdec", "no");
-            MpvClientNative.Check(MpvClientNative.Initialize(_mpv), "mpv 缩略图初始化失败。");
-            MpvClientNative.Check(
-                MpvClientNative.StreamCbAddRo(_mpv, "comicthumb", GCHandle.ToIntPtr(_streamUserDataHandle), MpvMemoryStream.OpenStreamCallback),
-                "mpv 缩略图内存流注册失败。");
+            var timer = Stopwatch.StartNew();
+            while (timer.ElapsedMilliseconds < 200)
+                if (ReadEvent(0.02).EventId is MpvEventId.None or MpvEventId.EndFile or MpvEventId.Idle or MpvEventId.Shutdown) break;
         }
     }
 
-    private static bool TryCaptureRawScreenshot(IntPtr handle, out VideoThumbnailImage? image)
+    private void Initialize()
     {
-        image = null;
-        using var command = MpvCommandNode.Create("screenshot-raw", "video");
-        var result = new MpvNode();
-        var commandResult = MpvClientNative.CommandNode(handle, ref command.Node, out result);
+        if (_mpv != IntPtr.Zero) return;
+        _streamHandle = GCHandle.Alloc(this);
         try
         {
-            return commandResult >= 0
-                && TryCreateThumbnailFromScreenshotNode(result, out image);
+            _mpv = MpvClientNative.Create();
+            MpvClientNative.Check(_mpv == IntPtr.Zero ? -1 : 0, "创建视频封面实例失败。");
+            foreach (var (name, value) in new[] { ("config", "no"), ("terminal", "no"), ("osc", "no"),
+                ("audio", "no"), ("vo", "null"), ("pause", "yes"), ("vf", "scale=480:-2"), ("cache", "no"), ("hwdec", "no") })
+                MpvClientNative.Check(MpvClientNative.SetOptionString(_mpv, name, value), "视频封面选项设置失败。");
+            MpvClientNative.Check(MpvClientNative.Initialize(_mpv), "视频封面初始化失败。");
+            MpvClientNative.Check(MpvClientNative.StreamCbAddRo(_mpv, "comicthumb", GCHandle.ToIntPtr(_streamHandle),
+                MpvMemoryStream.OpenStreamCallback), "视频封面内存流注册失败。");
         }
-        finally
-        {
-            MpvClientNative.FreeNodeContents(ref result);
-        }
+        catch { Destroy(); throw; }
     }
 
-    private static bool TryCreateThumbnailFromScreenshotNode(MpvNode node, out VideoThumbnailImage? image)
+    private MpvEvent ReadEvent(double timeout) => Marshal.PtrToStructure<MpvEvent>(MpvClientNative.WaitEvent(_mpv, timeout));
+
+    private BitmapSource? CaptureBitmap()
     {
-        image = null;
-        if (node.Format != MpvFormat.NodeMap || node.U.List == IntPtr.Zero)
+        // mpv accepts a null-terminated string array; no manually allocated command tree.
+        if (MpvClientNative.CommandRet(_mpv, ["screenshot-raw", "video", null], out var result) < 0) return null;
+        try
         {
-            return false;
-        }
-
-        var map = Marshal.PtrToStructure<MpvNodeList>(node.U.List);
-        var width = 0;
-        var height = 0;
-        var stride = 0;
-        string? format = null;
-        byte[]? pixels = null;
-
-        for (var i = 0; i < map.Num; i++)
-        {
-            var keyPointer = Marshal.ReadIntPtr(map.Keys, i * IntPtr.Size);
-            var key = Marshal.PtrToStringAnsi(keyPointer);
-            var valuePointer = IntPtr.Add(map.Values, i * Marshal.SizeOf<MpvNode>());
-            var value = Marshal.PtrToStructure<MpvNode>(valuePointer);
-
-            switch (key)
+            if (result.Format != MpvFormat.NodeMap || result.U.List == IntPtr.Zero) return null;
+            var map = Marshal.PtrToStructure<MpvNodeList>(result.U.List);
+            int width = 0, height = 0, stride = 0;
+            string? format = null;
+            var pixels = new MpvByteArray();
+            for (var i = 0; i < map.Num; i++)
             {
-                case "w":
-                    width = ReadNodeInt32(value);
-                    break;
-                case "h":
-                    height = ReadNodeInt32(value);
-                    break;
-                case "stride":
-                    stride = ReadNodeInt32(value);
-                    break;
-                case "format":
-                    format = value.Format == MpvFormat.String
-                        ? Marshal.PtrToStringAnsi(value.U.String)
-                        : null;
-                    break;
-                case "data":
-                    pixels = ReadNodeByteArray(value);
-                    break;
+                var key = Marshal.PtrToStringAnsi(Marshal.ReadIntPtr(map.Keys, i * IntPtr.Size));
+                var value = Marshal.PtrToStructure<MpvNode>(IntPtr.Add(map.Values, i * Marshal.SizeOf<MpvNode>()));
+                switch (key)
+                {
+                    case "w" when value.Format == MpvFormat.Int64: width = checked((int)value.U.Int64); break;
+                    case "h" when value.Format == MpvFormat.Int64: height = checked((int)value.U.Int64); break;
+                    case "stride" when value.Format == MpvFormat.Int64: stride = checked((int)value.U.Int64); break;
+                    case "format" when value.Format == MpvFormat.String: format = Marshal.PtrToStringAnsi(value.U.String); break;
+                    case "data" when value.Format == MpvFormat.ByteArray && value.U.ByteArray != IntPtr.Zero:
+                        pixels = Marshal.PtrToStructure<MpvByteArray>(value.U.ByteArray); break;
+                }
             }
-        }
-
-        if (width <= 0 || height <= 0 || stride <= 0 || string.IsNullOrWhiteSpace(format) || pixels is null)
-        {
-            return false;
-        }
-
-        if (!TryEncodeRawFrameAsPng(pixels, width, height, stride, format, out var imageData))
-        {
-            return false;
-        }
-
-        image = new VideoThumbnailImage(imageData, width, height, width, height);
-        return true;
-    }
-
-    private static int ReadNodeInt32(MpvNode node)
-    {
-        return node.Format == MpvFormat.Int64
-            ? (int)Math.Clamp(node.U.Int64, int.MinValue, int.MaxValue)
-            : 0;
-    }
-
-    private static byte[]? ReadNodeByteArray(MpvNode node)
-    {
-        if (node.Format != MpvFormat.ByteArray || node.U.ByteArray == IntPtr.Zero)
-        {
-            return null;
-        }
-
-        var byteArray = Marshal.PtrToStructure<MpvByteArray>(node.U.ByteArray);
-        var size = checked((int)byteArray.Size);
-        var bytes = new byte[size];
-        if (size > 0)
-        {
-            Marshal.Copy(byteArray.Data, bytes, 0, size);
-        }
-
-        return bytes;
-    }
-
-    private static bool TryEncodeRawFrameAsPng(
-        byte[] pixels,
-        int width,
-        int height,
-        int stride,
-        string format,
-        out ArraySegment<byte> imageData)
-    {
-        imageData = default;
-        var pixelFormat = format switch
-        {
-            "bgr0" => PixelFormats.Bgr32,
-            "bgra" => PixelFormats.Bgra32,
-            "bgr24" => PixelFormats.Bgr24,
-            "rgb24" => PixelFormats.Rgb24,
-            "rgba" => PixelFormats.Bgra32,
-            _ => PixelFormats.Default
-        };
-
-        if (pixelFormat == PixelFormats.Default)
-        {
-            return false;
-        }
-
-        var encodedPixels = format == "rgba"
-            ? ConvertRgbaToBgra(pixels)
-            : pixels;
-
-        var bitmap = BitmapSource.Create(
-            width,
-            height,
-            96,
-            96,
-            pixelFormat,
-            null,
-            encodedPixels,
-            stride);
-        bitmap.Freeze();
-
-        var encoder = new PngBitmapEncoder();
-        encoder.Frames.Add(BitmapFrame.Create(bitmap));
-        using var stream = new MemoryStream();
-        encoder.Save(stream);
-        imageData = new ArraySegment<byte>(stream.ToArray());
-        return true;
-    }
-
-    private static byte[] ConvertRgbaToBgra(byte[] pixels)
-    {
-        var converted = new byte[pixels.Length];
-        for (var i = 0; i + 3 < pixels.Length; i += 4)
-        {
-            converted[i] = pixels[i + 2];
-            converted[i + 1] = pixels[i + 1];
-            converted[i + 2] = pixels[i];
-            converted[i + 3] = pixels[i + 3];
-        }
-
-        return converted;
-    }
-
-    private sealed class MpvCommandNode : IDisposable
-    {
-        private readonly IntPtr _listPointer;
-        private readonly IntPtr _valuesPointer;
-        private readonly List<IntPtr> _stringPointers;
-
-        private MpvCommandNode(IntPtr listPointer, IntPtr valuesPointer, List<IntPtr> stringPointers)
-        {
-            _listPointer = listPointer;
-            _valuesPointer = valuesPointer;
-            _stringPointers = stringPointers;
-            Node = new MpvNode
+            var pixelFormat = format switch
             {
-                U = new MpvNodeUnion { List = _listPointer },
-                Format = MpvFormat.NodeArray
+                "bgr0" => PixelFormats.Bgr32,
+                "bgra" or "rgba" => PixelFormats.Bgra32,
+                "bgr24" => PixelFormats.Bgr24,
+                "rgb24" => PixelFormats.Rgb24,
+                _ => PixelFormats.Default
             };
-        }
-
-        public MpvNode Node;
-
-        public static MpvCommandNode Create(params string[] args)
-        {
-            var nodeSize = Marshal.SizeOf<MpvNode>();
-            var valuesPointer = Marshal.AllocHGlobal(nodeSize * args.Length);
-            var stringPointers = new List<IntPtr>(args.Length);
-
-            for (var i = 0; i < args.Length; i++)
+            if (width <= 0 || height <= 0 || stride <= 0 || pixels.Data == IntPtr.Zero || pixelFormat == PixelFormats.Default) return null;
+            var size = checked((int)pixels.Size);
+            BitmapSource bitmap;
+            if (format == "rgba")
             {
-                var stringPointer = Marshal.StringToHGlobalAnsi(args[i]);
-                stringPointers.Add(stringPointer);
-                var argNode = new MpvNode
-                {
-                    U = new MpvNodeUnion { String = stringPointer },
-                    Format = MpvFormat.String
-                };
-                Marshal.StructureToPtr(argNode, IntPtr.Add(valuesPointer, i * nodeSize), false);
+                var converted = new byte[size];
+                Marshal.Copy(pixels.Data, converted, 0, size);
+                for (var i = 0; i + 3 < size; i += 4) (converted[i], converted[i + 2]) = (converted[i + 2], converted[i]);
+                bitmap = BitmapSource.Create(width, height, 96, 96, pixelFormat, null, converted, stride);
             }
-
-            var listPointer = Marshal.AllocHGlobal(Marshal.SizeOf<MpvNodeList>());
-            Marshal.StructureToPtr(
-                new MpvNodeList
-                {
-                    Num = args.Length,
-                    Keys = IntPtr.Zero,
-                    Values = valuesPointer
-                },
-                listPointer,
-                false);
-
-            return new MpvCommandNode(listPointer, valuesPointer, stringPointers);
+            else
+                bitmap = BitmapSource.Create(width, height, 96, 96, pixelFormat, null, pixels.Data, size, stride);
+            bitmap.Freeze();
+            return bitmap;
         }
+        finally { MpvClientNative.FreeNodeContents(ref result); }
+    }
 
-        public void Dispose()
-        {
-            foreach (var stringPointer in _stringPointers)
-            {
-                Marshal.FreeHGlobal(stringPointer);
-            }
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        _gate.Wait();
+        try { Destroy(); }
+        finally { _gate.Release(); }
+    }
 
-            Marshal.FreeHGlobal(_valuesPointer);
-            Marshal.FreeHGlobal(_listPointer);
-        }
+    private void Destroy()
+    {
+        if (_mpv != IntPtr.Zero) MpvClientNative.TerminateDestroy(_mpv);
+        _mpv = IntPtr.Zero;
+        if (_streamHandle.IsAllocated) _streamHandle.Free();
+        lock (_sourceLock) { _source = default; _uri = null; }
     }
 }
-
-[StructLayout(LayoutKind.Sequential)]
-internal struct MpvNode
-{
-    public MpvNodeUnion U;
-    public MpvFormat Format;
-}
-
-[StructLayout(LayoutKind.Explicit)]
-internal struct MpvNodeUnion
-{
-    [FieldOffset(0)]
-    public IntPtr String;
-
-    [FieldOffset(0)]
-    public long Int64;
-
-    [FieldOffset(0)]
-    public double Double;
-
-    [FieldOffset(0)]
-    public IntPtr List;
-
-    [FieldOffset(0)]
-    public IntPtr ByteArray;
-}
-
-[StructLayout(LayoutKind.Sequential)]
-internal struct MpvNodeList
-{
-    public int Num;
-    public IntPtr Values;
-    public IntPtr Keys;
-}
-
-[StructLayout(LayoutKind.Sequential)]
-internal struct MpvByteArray
-{
-    public IntPtr Data;
-    public nuint Size;
-}
-
-internal sealed record VideoThumbnailImage(
-    ArraySegment<byte> ImageData,
-    long VideoWidth,
-    long VideoHeight,
-    int PixelWidth,
-    int PixelHeight);

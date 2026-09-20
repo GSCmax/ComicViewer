@@ -1,5 +1,4 @@
 using System.IO;
-using System.Text.Json;
 using System.Windows;
 using System.Windows.Input;
 
@@ -34,7 +33,7 @@ public partial class MainWindow
         _passwordPrompt = null;
         PasswordOverlay.Visibility = Visibility.Collapsed;
         ArchivePasswordBox.Clear();
-        OpenArchiveButton.IsEnabled = true;
+        OpenArchiveButton.IsEnabled = !_isLoadingArchive && !_closing;
         prompt.TrySetResult(password);
     }
 
@@ -67,71 +66,4 @@ public partial class MainWindow
         PasswordOpenButton.IsEnabled = !string.IsNullOrWhiteSpace(ArchivePasswordBox.Password);
     }
 
-    private static string PasswordHistoryFilePath =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ComicViewer", "password-history.json");
-
-    private void LoadPasswordHistory()
-    {
-        try
-        {
-            if (!File.Exists(PasswordHistoryFilePath))
-            {
-                return;
-            }
-
-            var passwords = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(PasswordHistoryFilePath));
-            foreach (var password in passwords?.Where(password => !string.IsNullOrWhiteSpace(password)).Distinct() ?? [])
-            {
-                PasswordHistory.Add(password);
-            }
-        }
-        catch
-        {
-        }
-    }
-
-    private void RememberPassword(string? password)
-    {
-        if (string.IsNullOrWhiteSpace(password))
-        {
-            return;
-        }
-
-        var existing = PasswordHistory.FirstOrDefault(item => string.Equals(item, password, StringComparison.Ordinal));
-        if (existing is not null)
-        {
-            PasswordHistory.Remove(existing);
-        }
-
-        PasswordHistory.Insert(0, password);
-        while (PasswordHistory.Count > 50)
-        {
-            PasswordHistory.RemoveAt(PasswordHistory.Count - 1);
-        }
-
-        SavePasswordHistory();
-    }
-
-    private void SavePasswordHistory()
-    {
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(PasswordHistoryFilePath)!);
-            File.WriteAllText(PasswordHistoryFilePath, JsonSerializer.Serialize(PasswordHistory.ToList(), new JsonSerializerOptions
-            {
-                WriteIndented = true
-            }));
-        }
-        catch
-        {
-        }
-    }
-
-    private static bool IsLikelyPasswordProblem(Exception exception)
-    {
-        var message = exception.ToString();
-        return message.Contains("password", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("encrypted", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("crypt", StringComparison.OrdinalIgnoreCase);
-    }
 }

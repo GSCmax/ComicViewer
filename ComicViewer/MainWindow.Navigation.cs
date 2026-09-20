@@ -4,329 +4,101 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace ComicViewer;
 
 public partial class MainWindow
 {
-    private void ImageScrollViewer_SizeChanged(object sender, SizeChangedEventArgs e)
-    {
-        InvalidateViewportSnapshot();
-        UpdatePageWidth(e.NewSize.Width);
-    }
+    private void ImageScrollViewer_SizeChanged(object sender, SizeChangedEventArgs e) => UpdatePageWidth(e.NewSize.Width);
 
     private void ImageScrollViewer_ScrollChanged(object sender, ScrollChangedEventArgs e)
     {
-        if (_isLoadingArchive || Pages.Count == 0)
-        {
-            return;
-        }
-
-        _lastScrollUtc = DateTime.UtcNow;
-        RefreshViewportSnapshot();
-        var currentPageIndex = GetCurrentPageIndex();
-        _currentPageIndex = currentPageIndex;
-        UpdateReadingStatus(currentPageIndex);
-        StartMediaLoading(currentPageIndex);
-        RefreshDecodedImages();
+        if (!_isLoadingArchive) RefreshReaderViewport();
     }
 
     private void ImageScrollViewer_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
     {
-        NavigateByMouseWheel(e);
-    }
-
-    private void NavigateByMouseWheel(MouseWheelEventArgs e)
-    {
-        PrepareForReaderNavigationInput();
-        var scrollViewer = GetPagesScrollViewer();
-        if (scrollViewer is null)
-        {
-            return;
-        }
-
-        var wheelLines = SystemParameters.WheelScrollLines > 0 ? SystemParameters.WheelScrollLines : 3;
-        var deltaSteps = e.Delta / (double)Mouse.MouseWheelDeltaForOneLine;
-        var scrollPixels = deltaSteps * wheelLines * MouseWheelPixelsPerLine * MouseWheelScrollMultiplier;
-        scrollViewer.ScrollToVerticalOffset(scrollViewer.VerticalOffset - scrollPixels);
+        CancelPageNumberInput();
+        if (GetPagesScrollViewer() is not { } scrollViewer) return;
+        var lines = SystemParameters.WheelScrollLines > 0 ? SystemParameters.WheelScrollLines : 3;
+        var pixels = e.Delta / (double)Mouse.MouseWheelDeltaForOneLine * lines * MouseWheelPixelsPerLine * MouseWheelScrollMultiplier;
+        scrollViewer.ScrollToVerticalOffset(scrollViewer.VerticalOffset - pixels);
         e.Handled = true;
     }
 
     private void NavigateByPageOffset(int offset)
     {
-        if (Pages.Count == 0)
-        {
-            return;
-        }
-
-        PrepareForReaderNavigationInput();
-        ScrollPageToTop(Math.Clamp(GetCurrentPageIndex() + offset, 0, Pages.Count - 1));
-    }
-
-    private void PrepareForReaderNavigationInput()
-    {
+        if (Pages.Count == 0) return;
         CancelPageNumberInput();
+        ScrollPageToTop(Math.Clamp(GetVisiblePageIndexes()[0] + offset, 0, Pages.Count - 1));
     }
 
     private void UpdatePageWidth(double fallbackWidth = 0)
     {
-        var previousDecodePixelWidth = GetDecodePixelWidth();
-        var width = ResolvePageWidth(fallbackWidth);
-        if (Math.Abs(width - _pageWidth) <= 0.1)
-        {
-            return;
-        }
-
-        _pageWidth = width;
-        foreach (var page in Pages)
-        {
-            page.Resize(width);
-        }
-        InvalidateViewportSnapshot();
-
-        if (Pages.Count > 0)
-        {
-            ClearDecodedImagesForWiderDecode(previousDecodePixelWidth, GetDecodePixelWidth());
-            StartMediaLoading(GetCurrentPageIndex());
-            RefreshDecodedImages();
-        }
-    }
-
-    private double ResolvePageWidth(double fallbackWidth = 0)
-    {
-        var scrollViewer = GetPagesScrollViewer();
-        var width = scrollViewer?.ViewportWidth ?? 0;
-        if (double.IsNaN(width) || width <= 1)
-        {
-            width = fallbackWidth;
-        }
-
-        if (double.IsNaN(width) || width <= 1)
-        {
-            width = PagesListBox.ActualWidth;
-        }
-
-        if (double.IsNaN(width) || width <= 1)
-        {
-            width = ActualWidth;
-        }
-
-        return Math.Max(1, width);
-    }
-
-    private int GetDecodePixelWidth()
-    {
-        return Math.Max(MinimumDecodePixelWidth, (int)Math.Ceiling(_pageWidth * VisualTreeHelper.GetDpi(this).DpiScaleX));
+        var width = GetPagesScrollViewer()?.ViewportWidth ?? 0;
+        if (!double.IsFinite(width) || width <= 1) width = fallbackWidth > 1 ? fallbackWidth : PagesListBox.ActualWidth;
+        width = Math.Max(1, width);
+        if (Math.Abs(width - PageWidth) <= 0.1) return;
+        PageWidth = width;
+        if (!_isLoadingArchive) RefreshReaderViewport();
     }
 
     private ScrollViewer? GetPagesScrollViewer()
     {
-        if (_pagesScrollViewer is not null)
-        {
-            return _pagesScrollViewer;
-        }
-
+        if (_pagesScrollViewer is not null) return _pagesScrollViewer;
         PagesListBox.ApplyTemplate();
-        _pagesScrollViewer = FindVisualChild<ScrollViewer>(PagesListBox);
-        return _pagesScrollViewer;
+        return _pagesScrollViewer = FindVisualChildren<ScrollViewer>(PagesListBox).FirstOrDefault();
     }
 
-    private int GetCurrentPageIndex()
+    private void RefreshReaderViewport()
     {
-        EnsureViewportSnapshot();
-        return TryGetFirstVisiblePageIndex() ?? GetPageIndexAtOffset(GetPagesScrollViewer()?.VerticalOffset ?? 0);
+        if (_images is null || Pages.Count == 0 || _closing) return;
+        var visible = GetVisiblePageIndexes();
+        _currentPageIndex = visible[0];
+        UpdateReadingStatus(_currentPageIndex);
+        var targets = visible.Concat(visible.SelectMany(index => new[] { index - 1, index + 1 })
+            .Where(index => index >= 0 && index < Pages.Count)).Distinct();
+        var decodeWidth = Math.Max(512, (int)Math.Ceiling(PageWidth * VisualTreeHelper.GetDpi(this).DpiScaleX / 128) * 128);
+        _images.Refresh(targets, decodeWidth);
     }
 
-    private int GetPageIndexAtOffset(double offset)
+    // Only realized containers are inspected; WPF already owns the layout and scroll position.
+    private int[] GetVisiblePageIndexes()
     {
-        var top = 0d;
-        for (var i = 0; i < Pages.Count; i++)
-        {
-            var pageHeight = Math.Max(1, Pages[i].DisplayHeight);
-            if (offset < top + pageHeight)
-            {
-                return i;
-            }
-
-            top += pageHeight;
-        }
-
-        return Math.Max(0, Pages.Count - 1);
-    }
-
-    private void ScrollPageToTop(int pageIndex)
-    {
-        if (pageIndex < 0 || pageIndex >= Pages.Count)
-        {
-            return;
-        }
-
-        PagesListBox.ScrollIntoView(Pages[pageIndex]);
-        Dispatcher.BeginInvoke((Action)(() =>
-        {
-            InvalidateViewportSnapshot();
-            AlignRealizedPageToTop(pageIndex);
-            _currentPageIndex = pageIndex;
-            UpdateReadingStatus(pageIndex);
-            StartMediaLoading(pageIndex);
-            RefreshDecodedImages();
-        }), System.Windows.Threading.DispatcherPriority.Loaded);
-    }
-
-    private void AlignRealizedPageToTop(int pageIndex)
-    {
-        var scrollViewer = GetPagesScrollViewer();
-        if (scrollViewer is null)
-        {
-            return;
-        }
-
-        PagesListBox.UpdateLayout();
-        if (PagesListBox.ItemContainerGenerator.ContainerFromIndex(pageIndex) is not FrameworkElement container)
-        {
-            return;
-        }
-
-        try
-        {
-            var bounds = container.TransformToAncestor(scrollViewer)
-                .TransformBounds(new Rect(0, 0, container.ActualWidth, container.ActualHeight));
-            scrollViewer.ScrollToVerticalOffset(scrollViewer.VerticalOffset + bounds.Top);
-        }
-        catch (InvalidOperationException)
-        {
-        }
-    }
-
-    private int? TryGetFirstVisiblePageIndex()
-    {
-        EnsureViewportSnapshot();
-        return _firstVisiblePageIndexSnapshot;
-    }
-
-    private HashSet<int> GetRealizedPageIndexes()
-    {
-        EnsureViewportSnapshot();
-        return new HashSet<int>(_realizedPageIndexesSnapshot);
-    }
-
-    private HashSet<int> GetVisiblePageIndexes(int adjacentPages)
-    {
-        EnsureViewportSnapshot();
-        var indexes = new HashSet<int>(_visiblePageIndexesSnapshot);
-        AddAdjacentPageIndexes(indexes, adjacentPages);
-        return indexes;
-    }
-
-    private void EnsureViewportSnapshot()
-    {
-        if (_viewportSnapshotDirty)
-        {
-            RefreshViewportSnapshot();
-        }
-    }
-
-    private void InvalidateViewportSnapshot()
-    {
-        _viewportSnapshotDirty = true;
-    }
-
-    private void RefreshViewportSnapshot()
-    {
-        var realizedIndexes = new HashSet<int>();
-        var visibleIndexes = new HashSet<int>();
-        int? firstVisibleIndex = null;
-        var bestTop = double.PositiveInfinity;
-        var scrollViewer = GetPagesScrollViewer();
-        if (scrollViewer is not null && Pages.Count > 0)
+        var indexes = new SortedSet<int>();
+        if (GetPagesScrollViewer() is { } scrollViewer)
         {
             foreach (var container in FindVisualChildren<ListBoxItem>(PagesListBox))
             {
                 var index = PagesListBox.ItemContainerGenerator.IndexFromContainer(container);
-                if (index < 0 || index >= Pages.Count)
-                {
-                    continue;
-                }
-
-                realizedIndexes.Add(index);
-                if (container.ActualHeight <= 0)
-                {
-                    continue;
-                }
-
-                Rect bounds;
-                try
-                {
-                    bounds = container.TransformToAncestor(scrollViewer)
-                        .TransformBounds(new Rect(0, 0, container.ActualWidth, container.ActualHeight));
-                }
-                catch (InvalidOperationException)
-                {
-                    continue;
-                }
-
-                if (bounds.Bottom <= 0 || bounds.Top >= scrollViewer.ViewportHeight)
-                {
-                    continue;
-                }
-
-                visibleIndexes.Add(index);
-                if (bounds.Top < bestTop)
-                {
-                    bestTop = bounds.Top;
-                    firstVisibleIndex = index;
-                }
+                if (index < 0 || index >= Pages.Count || container.ActualHeight <= 0) continue;
+                var bounds = container.TransformToAncestor(scrollViewer).TransformBounds(new Rect(container.RenderSize));
+                if (bounds.Bottom > 0 && bounds.Top < scrollViewer.ViewportHeight) indexes.Add(index);
             }
         }
-
-        if (visibleIndexes.Count == 0 && Pages.Count > 0)
-        {
-            var fallbackIndex = Math.Clamp(_currentPageIndex, 0, Pages.Count - 1);
-            visibleIndexes.Add(fallbackIndex);
-        }
-
-        _realizedPageIndexesSnapshot = realizedIndexes;
-        _visiblePageIndexesSnapshot = visibleIndexes;
-        _firstVisiblePageIndexSnapshot = firstVisibleIndex;
-        _viewportSnapshotDirty = false;
+        if (indexes.Count == 0 && Pages.Count > 0) indexes.Add(Math.Clamp(_currentPageIndex, 0, Pages.Count - 1));
+        return indexes.ToArray();
     }
 
-    private void AddAdjacentPageIndexes(HashSet<int> indexes, int adjacentPages)
+    private void ScrollPageToTop(int pageIndex)
     {
-        if (adjacentPages <= 0 || Pages.Count == 0)
+        if (pageIndex < 0 || pageIndex >= Pages.Count) return;
+        var reader = _reader;
+        PagesListBox.ScrollIntoView(Pages[pageIndex]);
+        Dispatcher.BeginInvoke(() =>
         {
-            return;
-        }
-
-        var visible = indexes.ToArray();
-        foreach (var index in visible)
-        {
-            for (var offset = 1; offset <= adjacentPages; offset++)
+            if (!ReferenceEquals(reader, _reader) || pageIndex >= Pages.Count || _closing) return;
+            PagesListBox.UpdateLayout();
+            if (GetPagesScrollViewer() is { } scrollViewer
+                && PagesListBox.ItemContainerGenerator.ContainerFromIndex(pageIndex) is FrameworkElement container)
             {
-                if (index - offset >= 0)
-                {
-                    indexes.Add(index - offset);
-                }
-
-                if (index + offset < Pages.Count)
-                {
-                    indexes.Add(index + offset);
-                }
+                var top = container.TransformToAncestor(scrollViewer).Transform(new Point()).Y;
+                scrollViewer.ScrollToVerticalOffset(scrollViewer.VerticalOffset + top);
             }
-        }
-    }
-
-    private IEnumerable<int> EnumeratePagesFrom(int currentPageIndex)
-    {
-        return Enumerable.Range(0, Pages.Count)
-            .OrderBy(index => GetReadingDistance(index, currentPageIndex))
-            .ThenBy(index => Math.Abs(index - currentPageIndex));
-    }
-
-    private static double GetReadingDistance(int pageIndex, int currentPageIndex)
-    {
-        var offset = pageIndex - currentPageIndex;
-        return offset >= 0 ? offset / 2d : -offset;
+            _currentPageIndex = pageIndex;
+            RefreshReaderViewport();
+        }, DispatcherPriority.Loaded);
     }
 
     private void UpdateReadingStatus(int currentPageIndex)
@@ -345,23 +117,7 @@ public partial class MainWindow
         }
 
         TotalPagesTextBlock.Text = Pages.Count.ToString(CultureInfo.InvariantCulture);
-        LoadedRangeTextBlock.Text = GetLoadedRangeText();
-    }
-
-    private string GetLoadedRangeText()
-    {
-        var loaded = Pages
-            .Where(page => page.HasEncodedDisplayImageData || (page.IsVideo && page.IsLoaded))
-            .Select(page => page.Index + 1)
-            .ToList();
-        if (loaded.Count == 0)
-        {
-            return "0";
-        }
-
-        return loaded.Count == 1
-            ? loaded[0].ToString(CultureInfo.InvariantCulture)
-            : $"{loaded.Min()}-{loaded.Max()}";
+        LoadedRangeTextBlock.Text = _reader?.LoadedRange ?? "0";
     }
 
     private void ClearReadingProgress()
@@ -391,7 +147,7 @@ public partial class MainWindow
         }
         else if (e.Key == Key.Escape)
         {
-            PrepareForReaderNavigationInput();
+            CancelPageNumberInput();
             e.Handled = true;
         }
     }
@@ -471,13 +227,6 @@ public partial class MainWindow
         }
     }
 
-    private static string FormatByteSize(long bytes)
-    {
-        return bytes >= 1024L * 1024 * 1024
-            ? $"{bytes / 1024d / 1024d / 1024d:0.0}GB"
-            : $"{bytes / 1024d / 1024d:0.0}MB";
-    }
-
     private static IEnumerable<T> FindVisualChildren<T>(DependencyObject parent)
         where T : DependencyObject
     {
@@ -496,24 +245,4 @@ public partial class MainWindow
         }
     }
 
-    private static T? FindVisualChild<T>(DependencyObject parent)
-        where T : DependencyObject
-    {
-        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
-        {
-            var child = VisualTreeHelper.GetChild(parent, i);
-            if (child is T typedChild)
-            {
-                return typedChild;
-            }
-
-            var nestedChild = FindVisualChild<T>(child);
-            if (nestedChild is not null)
-            {
-                return nestedChild;
-            }
-        }
-
-        return null;
-    }
 }
