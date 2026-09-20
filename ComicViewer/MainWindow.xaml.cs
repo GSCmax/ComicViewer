@@ -59,8 +59,6 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
-        //WindowBackdropHelper.Apply(this);
-
         DataContext = this;
         _sharedVideoPlayer = CreateVideoPlayer();
         VideoCoverGeneratorHost.Content = _sharedVideoPlayer;
