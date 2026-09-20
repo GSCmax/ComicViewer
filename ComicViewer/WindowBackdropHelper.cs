@@ -1,3 +1,4 @@
+/*
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
@@ -124,3 +125,4 @@ namespace ComicViewer
         private static extern int RtlGetVersion(ref OsVersionInfoEx versionInfo);
     }
 }
+*/

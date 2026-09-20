@@ -59,7 +59,7 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
-        WindowBackdropHelper.Apply(this);
+        //WindowBackdropHelper.Apply(this);
 
         DataContext = this;
         _sharedVideoPlayer = CreateVideoPlayer();
